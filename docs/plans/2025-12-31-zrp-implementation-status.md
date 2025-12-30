@@ -17,7 +17,7 @@ The Zellij Remote Protocol (ZRP) enables Mosh-style remote terminal access over 
 | Phase 3 | Backpressure & Flow Control | ✅ Complete |
 | Phase 4 | Controller Lease | ✅ Complete |
 | Phase 5 | Input Handling | ✅ Complete |
-| Phase 6 | Client-side Prediction | 🔲 Not Started |
+| Phase 6 | Client-side Prediction | ✅ Complete |
 | Phase 7 | Mobile Client Library | 🔲 Not Started |
 
 ## Crate Structure
@@ -41,8 +41,9 @@ zellij-remote-core/       # State management
     ├── lease.rs          # LeaseManager (controller lease state machine)
     ├── input.rs          # InputReceiver/InputSender (reliable input)
     ├── rtt.rs            # RttEstimator (EWMA RTT estimation)
+    ├── prediction.rs     # PredictionEngine (local echo, reconciliation)
     ├── session.rs        # RemoteSession (aggregates all state)
-    └── tests/            # 91 tests including proptest
+    └── tests/            # 134 tests including proptest
 
 zellij-remote-bridge/     # WebTransport server
 ├── examples/
@@ -57,12 +58,12 @@ zellij-remote-bridge/     # WebTransport server
 
 ## Test Coverage
 
-**Total: 201+ tests**
+**Total: 244 tests**
 
 | Package | Unit Tests | Integration Tests | Property-Based |
 |---------|------------|-------------------|----------------|
 | zellij-remote-protocol | 89 | - | - |
-| zellij-remote-core | 85 | - | 6 (proptest) |
+| zellij-remote-core | 134 | - | 6 (proptest) |
 | zellij-remote-bridge | 15 | 6 | - |
 
 ### Key Test Categories
@@ -74,6 +75,7 @@ zellij-remote-bridge/     # WebTransport server
 - **Lease**: State machine transitions, policies, viewer mode
 - **Input**: Sequencing, deduplication, controller gating
 - **RTT**: EWMA smoothing, RTO calculation
+- **Prediction**: Local echo, ack reconciliation, misprediction correction
 - **Session**: Multi-client, baseline advancement
 - **Framing**: Partial reads, multiple frames, corruption handling
 - **Handshake**: Success, errors, capability negotiation
@@ -162,6 +164,19 @@ apt-get install protobuf-compiler  # For prost-build
 - Controller gating prevents unauthorized input
 - RTT estimation via echoed timestamps
 
+### 7. Resume Tokens
+- Server generates unique resume tokens per client
+- Tokens sent in ServerHello for client storage
+- ClientHello includes token for session resumption
+- Enables reconnection to same session with state continuity
+
+### 8. Client-side Prediction
+- Local echo for printable characters provides instant feedback
+- Pending predictions tracked until server acknowledgment
+- Ack-driven reconciliation clears confirmed predictions
+- Misprediction detection with automatic correction
+- Non-echoing modes (password prompts) disable prediction
+
 ## Next Steps
 
 ### Immediate (High Value)
@@ -173,22 +188,9 @@ Connect to real Zellij sessions:
 - Route input events to PTY
 - Attach to existing sessions by name
 
-#### 2. Resume Tokens
-True Mosh-style resumption:
-- Server sends resume_token in ServerHello
-- Client stores and sends on reconnect
-- Server sends delta from last-acked state (not full snapshot)
-- Requires: state history buffer
-
 ### Future
 
-#### 3. Client-side Prediction (Phase 6)
-Local echo for low-latency feel:
-- Predict character echo
-- Reconcile with server state
-- Handle mispredictions gracefully
-
-#### 4. Mobile Client Library (Phase 7)
+#### 2. Mobile Client Library (Phase 7)
 UniFFI bindings for iOS/Android:
 - Swift/Kotlin wrappers
 - Native UI rendering

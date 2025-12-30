@@ -82,6 +82,7 @@ Key components:
 - `RenderWindow` - Backpressure/flow control
 - `InputReceiver/InputSender` - Reliable input handling
 - `RttEstimator` - RTT estimation for latency tracking
+- `PredictionEngine` - Client-side local echo with reconciliation
 
 ### zellij-remote-bridge
 WebTransport server implementation.
@@ -168,7 +169,7 @@ See [docs/plans/2024-12-31-zrp-implementation-status.md](plans/2024-12-31-zrp-im
 - ✅ Controller lease
 - ✅ Input handling with acknowledgment
 - ✅ RTT estimation
+- ✅ Resume tokens
+- ✅ Client-side prediction
 - 🔲 Zellij integration
-- 🔲 Resume tokens
-- 🔲 Client-side prediction
 - 🔲 Mobile client library
