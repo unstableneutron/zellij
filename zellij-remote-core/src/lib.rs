@@ -5,8 +5,10 @@ pub mod frame;
 pub mod input;
 pub mod lease;
 pub mod render_seq;
+pub mod resume_token;
 pub mod rtt;
 pub mod session;
+pub mod state_history;
 pub mod style_table;
 
 #[cfg(test)]
@@ -21,6 +23,8 @@ pub use input::{
 };
 pub use lease::{LeaseEvent, LeaseManager, LeaseResult, LeaseState};
 pub use render_seq::{DatagramDecision, RenderSender, RenderSeqTracker};
+pub use resume_token::{ResumeResult, ResumeToken};
 pub use rtt::RttEstimator;
 pub use session::{InputError, RemoteSession, RenderUpdate};
+pub use state_history::StateHistory;
 pub use style_table::StyleTable;

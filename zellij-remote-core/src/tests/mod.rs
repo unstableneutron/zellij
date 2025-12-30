@@ -5,6 +5,8 @@ mod input_tests;
 mod lease_tests;
 mod proptest_tests;
 mod render_seq_tests;
+mod resume_token_tests;
 mod rtt_tests;
 mod session_tests;
+mod state_history_tests;
 mod style_table_tests;

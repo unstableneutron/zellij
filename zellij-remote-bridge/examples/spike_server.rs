@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use zellij_remote_bridge::encode_envelope;
-use zellij_remote_core::{Cell, FrameStore, InputError, LeaseResult, RemoteSession, RenderUpdate};
+use zellij_remote_core::{
+    Cell, FrameStore, InputError, LeaseResult, RemoteSession, RenderUpdate, ResumeResult,
+};
 use zellij_remote_protocol::{
     input_event, key_event, stream_envelope, Capabilities, ClientHello, DenyControl, DisplaySize,
     GrantControl, InputEvent, ProtocolVersion, ServerHello, SessionState, StreamEnvelope,
@@ -45,6 +47,7 @@ async fn main() -> Result<()> {
         let mut s = session.write().await;
         draw_welcome_screen(&mut s.frame_store);
         s.frame_store.advance_state();
+        s.record_state_snapshot();
     }
 
     let session_updater = session.clone();
@@ -55,6 +58,7 @@ async fn main() -> Result<()> {
             let mut session = session_updater.write().await;
             update_animation(&mut session.frame_store, counter);
             session.frame_store.advance_state();
+            session.record_state_snapshot();
             counter += 1;
         }
     });
@@ -84,26 +88,52 @@ async fn handle_connection(
 ) -> Result<()> {
     let (mut send, mut recv) = connection.accept_bi().await?;
 
-    let client_id = CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    {
-        let mut s = session.write().await;
-        s.add_client(client_id, DEFAULT_RENDER_WINDOW);
-        log::info!(
-            "Client {} connected (total clients: {})",
-            client_id,
-            s.client_count()
-        );
-    }
-
     let client_hello = read_client_hello(&mut recv).await?;
+
+    let (client_id, resumed) = {
+        let mut s = session.write().await;
+
+        if !client_hello.resume_token.is_empty() {
+            match s.try_resume(&client_hello.resume_token, DEFAULT_RENDER_WINDOW) {
+                ResumeResult::Resumed {
+                    client_id,
+                    baseline_state_id,
+                } => {
+                    log::info!(
+                        "Client {} resumed from state_id={} (total clients: {})",
+                        client_id,
+                        baseline_state_id,
+                        s.client_count()
+                    );
+                    (client_id, true)
+                },
+                reason => {
+                    log::info!("Resume token rejected ({:?}), creating new client", reason);
+                    let client_id = CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+                    s.add_client(client_id, DEFAULT_RENDER_WINDOW);
+                    (client_id, false)
+                },
+            }
+        } else {
+            let client_id = CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+            s.add_client(client_id, DEFAULT_RENDER_WINDOW);
+            log::info!(
+                "Client {} connected (total clients: {})",
+                client_id,
+                s.client_count()
+            );
+            (client_id, false)
+        }
+    };
+
     log::info!(
-        "Received ClientHello from {} (client_id={})",
+        "Received ClientHello from {} (client_id={}, resumed={})",
         client_hello.client_name,
-        client_id
+        client_id,
+        resumed
     );
 
-    let server_hello = {
+    let (server_hello, resume_token) = {
         let mut s = session.write().await;
         let lease = s.lease_manager.request_control(
             client_id,
@@ -116,18 +146,34 @@ async fn handle_connection(
             LeaseResult::Denied { .. } => s.lease_manager.get_current_lease(),
         };
 
-        build_server_hello(&client_hello, client_id, lease_info)
+        let resume_token = s.generate_resume_token(client_id);
+        (
+            build_server_hello(&client_hello, client_id, lease_info, resume_token.clone()),
+            resume_token,
+        )
     };
 
     let encoded = encode_envelope(&StreamEnvelope {
         msg: Some(stream_envelope::Msg::ServerHello(server_hello)),
     })?;
     send.write_all(&encoded).await?;
-    log::info!("Sent ServerHello to client {}", client_id);
+    log::info!(
+        "Sent ServerHello to client {} (resume_token len={})",
+        client_id,
+        resume_token.len()
+    );
 
     {
         let mut s = session.write().await;
-        if let Some(RenderUpdate::Snapshot(snapshot)) = s.get_render_update(client_id) {
+        if resumed {
+            if let Some(RenderUpdate::Delta(delta)) = s.get_render_update(client_id) {
+                let encoded = encode_envelope(&StreamEnvelope {
+                    msg: Some(stream_envelope::Msg::ScreenDeltaStream(delta)),
+                })?;
+                send.write_all(&encoded).await?;
+                log::info!("Sent resume delta to client {}", client_id);
+            }
+        } else if let Some(RenderUpdate::Snapshot(snapshot)) = s.get_render_update(client_id) {
             let encoded = encode_envelope(&StreamEnvelope {
                 msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot)),
             })?;
@@ -382,6 +428,7 @@ fn build_server_hello(
     client_hello: &ClientHello,
     client_id: u64,
     lease: Option<zellij_remote_protocol::ControllerLease>,
+    resume_token: Vec<u8>,
 ) -> ServerHello {
     let negotiated_caps = Capabilities {
         supports_datagrams: client_hello
@@ -408,7 +455,7 @@ fn build_server_hello(
         session_name: "spike-demo".to_string(),
         session_state: SessionState::Running.into(),
         lease,
-        resume_token: vec![],
+        resume_token,
         snapshot_interval_ms: 5000,
         max_inflight_inputs: 256,
         render_window: DEFAULT_RENDER_WINDOW,

@@ -29,7 +29,7 @@ impl ClientRenderState {
     }
 
     pub fn advance_baseline(&mut self, acked_state_id: u64, acked_frame: FrameData) {
-        if acked_state_id > self.acked_baseline_state_id {
+        if acked_state_id >= self.acked_baseline_state_id || self.acked_baseline.is_none() {
             self.acked_baseline = Some(acked_frame);
             self.acked_baseline_state_id = acked_state_id;
         }

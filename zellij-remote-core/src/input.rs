@@ -28,6 +28,13 @@ impl InputReceiver {
         }
     }
 
+    pub fn new_from_seq(last_acked_seq: u64) -> Self {
+        Self {
+            last_processed_seq: last_acked_seq,
+            pending_rtt_sample: None,
+        }
+    }
+
     pub fn process_input(&mut self, input: &InputEvent) -> InputProcessResult {
         let seq = input.input_seq;
 

@@ -8,12 +8,15 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use prost::Message;
+use std::fs;
 use std::io::{stdout, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use wtransport::{ClientConfig, Endpoint};
+
+const RESUME_TOKEN_FILE: &str = "/tmp/zellij-spike-resume-token";
 
 use zellij_remote_core::{AckResult, InputSender};
 use zellij_remote_protocol::{
@@ -250,6 +253,22 @@ fn crossterm_key_to_proto(key: &CtKeyEvent) -> Option<InputEvent> {
     })
 }
 
+fn load_resume_token() -> Vec<u8> {
+    fs::read(RESUME_TOKEN_FILE).unwrap_or_default()
+}
+
+fn save_resume_token(token: &[u8]) {
+    if token.is_empty() {
+        let _ = fs::remove_file(RESUME_TOKEN_FILE);
+    } else {
+        let _ = fs::write(RESUME_TOKEN_FILE, token);
+    }
+}
+
+fn clear_resume_token() {
+    let _ = fs::remove_file(RESUME_TOKEN_FILE);
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -257,6 +276,20 @@ async fn main() -> Result<()> {
     let server_url =
         std::env::var("SERVER_URL").unwrap_or_else(|_| "https://127.0.0.1:4433".to_string());
     let headless = std::env::var("HEADLESS").is_ok();
+    let clear_token = std::env::var("CLEAR_TOKEN").is_ok();
+
+    if clear_token {
+        clear_resume_token();
+        eprintln!("Cleared stored resume token");
+    }
+
+    let resume_token = load_resume_token();
+    if !resume_token.is_empty() {
+        eprintln!(
+            "Found stored resume token ({} bytes), will attempt resume",
+            resume_token.len()
+        );
+    }
 
     let config = ClientConfig::builder()
         .with_bind_default()
@@ -290,7 +323,7 @@ async fn main() -> Result<()> {
                 supports_hyperlinks: false,
             }),
             bearer_token: vec![],
-            resume_token: vec![],
+            resume_token,
         })),
     };
 
@@ -331,9 +364,12 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
             match envelope.msg {
                 Some(stream_envelope::Msg::ServerHello(hello)) => {
                     println!(
-                        "ServerHello: session={}, client_id={}",
-                        hello.session_name, hello.client_id
+                        "ServerHello: session={}, client_id={}, resume_token_len={}",
+                        hello.session_name,
+                        hello.client_id,
+                        hello.resume_token.len()
                     );
+                    save_resume_token(&hello.resume_token);
                 },
                 Some(stream_envelope::Msg::ScreenSnapshot(snapshot)) => {
                     println!(
@@ -344,6 +380,7 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
                         snapshot.rows.len()
                     );
                 },
+
                 Some(stream_envelope::Msg::ScreenDeltaStream(delta)) => {
                     delta_count += 1;
                     println!(
@@ -422,6 +459,8 @@ async fn run_client_loop(
                 while let Some(envelope) = decode_envelope(&mut buffer)? {
                     match envelope.msg {
                         Some(stream_envelope::Msg::ServerHello(hello)) => {
+                            save_resume_token(&hello.resume_token);
+
                             if let Some(lease) = &hello.lease {
                                 if lease.owner_client_id == hello.client_id {
                                     is_controller = true;
@@ -469,6 +508,7 @@ async fn run_client_loop(
                             screen.render()?;
                             snapshot_received = true;
                         }
+
                         Some(stream_envelope::Msg::ScreenDeltaStream(delta)) => {
                             if !snapshot_received {
                                 continue;

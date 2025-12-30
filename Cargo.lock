@@ -1257,6 +1257,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -1894,6 +1895,15 @@ name = "highway"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3461b968f695ca312b968503261f5a345de0f02a39dbaa3021f20d53b426395d"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "httlib-huffman"
@@ -5858,9 +5868,12 @@ dependencies = [
 name = "zellij-remote-core"
 version = "0.44.0"
 dependencies = [
+ "hmac",
  "log",
  "proptest",
  "prost",
+ "rand 0.8.5",
+ "sha2",
  "zellij-remote-protocol",
 ]
 

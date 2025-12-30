@@ -7,12 +7,12 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::panes::grid::{Grid, Row as ZellijRow};
+#[cfg(test)]
+use crate::panes::terminal_character::DEFAULT_STYLES;
 use crate::panes::terminal_character::{
     AnsiCode, AnsiStyledUnderline, CharacterStyles, CursorShape as ZellijCursorShape, NamedColor,
     RcCharacterStyles, TerminalCharacter,
 };
-#[cfg(test)]
-use crate::panes::terminal_character::DEFAULT_STYLES;
 use zellij_remote_core::{Cell, Cursor, CursorShape, FrameStore, RowData, StyleTable};
 use zellij_remote_protocol::{color, Color, DefaultColor, Rgb, Style, UnderlineStyle};
 

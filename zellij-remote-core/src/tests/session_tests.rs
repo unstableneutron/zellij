@@ -1,4 +1,5 @@
 use crate::frame::FrameData;
+use crate::resume_token::{ResumeResult, ResumeToken};
 use crate::session::{InputError, RemoteSession};
 use zellij_remote_protocol::{DisplaySize, InputEvent, StateAck};
 
@@ -137,4 +138,163 @@ fn test_per_client_input_receivers() {
     assert!(result2.is_ok());
     let ack2 = result2.unwrap();
     assert_eq!(ack2.acked_seq, 1);
+}
+
+#[test]
+fn test_resume_token_generation_and_validation() {
+    let mut session = RemoteSession::with_session_id(80, 24, 42);
+
+    session.add_client(1, 4);
+
+    session.frame_store.advance_state();
+    session.record_state_snapshot();
+
+    let _ = session.get_render_update(1);
+
+    let token_bytes = session.generate_resume_token(1);
+    assert!(!token_bytes.is_empty());
+
+    let token = ResumeToken::decode_signed(&token_bytes, session.token_secret())
+        .expect("token should decode");
+    assert_eq!(token.session_id, 42);
+    assert_eq!(token.client_id, 1);
+}
+
+#[test]
+fn test_resume_with_valid_token() {
+    let mut session = RemoteSession::with_session_id(80, 24, 42);
+
+    session.add_client(1, 4);
+    session.frame_store.advance_state();
+    session.record_state_snapshot();
+
+    let _ = session.get_render_update(1);
+
+    let token_bytes = session.generate_resume_token(1);
+
+    session.remove_client(1);
+    assert!(!session.has_client(1));
+
+    let result = session.try_resume(&token_bytes, 4);
+    assert!(matches!(
+        result,
+        ResumeResult::Resumed {
+            client_id: 1,
+            ..
+        }
+    ));
+    assert!(session.has_client(1));
+}
+
+#[test]
+fn test_resume_with_invalid_token() {
+    let mut session = RemoteSession::with_session_id(80, 24, 42);
+
+    let result = session.try_resume(&[0u8; 10], 4);
+    assert!(matches!(result, ResumeResult::InvalidToken));
+}
+
+#[test]
+fn test_resume_with_session_mismatch() {
+    let mut session = RemoteSession::with_session_id(80, 24, 42);
+
+    session.add_client(1, 4);
+    session.frame_store.advance_state();
+    session.record_state_snapshot();
+
+    let token = ResumeToken::new(99, 1, 1, 0);
+    let token_bytes = token.encode_signed(session.token_secret());
+
+    let result = session.try_resume(&token_bytes, 4);
+    assert!(matches!(result, ResumeResult::SessionMismatch));
+}
+
+#[test]
+fn test_resume_with_state_not_found() {
+    let mut session = RemoteSession::with_session_id(80, 24, 42);
+
+    session.add_client(1, 4);
+    session.frame_store.advance_state();
+    session.record_state_snapshot();
+
+    session.remove_client(1);
+
+    let token = ResumeToken::new(42, 1, 999, 0);
+    let token_bytes = token.encode_signed(session.token_secret());
+
+    let result = session.try_resume(&token_bytes, 4);
+    assert!(matches!(result, ResumeResult::StateNotFound));
+}
+
+#[test]
+fn test_resume_with_client_id_in_use() {
+    let mut session = RemoteSession::with_session_id(80, 24, 42);
+
+    session.add_client(1, 4);
+    session.frame_store.advance_state();
+    session.record_state_snapshot();
+
+    let _ = session.get_render_update(1);
+
+    let token_bytes = session.generate_resume_token(1);
+
+    let result = session.try_resume(&token_bytes, 4);
+    assert!(matches!(result, ResumeResult::ClientIdInUse));
+}
+
+#[test]
+fn test_resumed_client_gets_delta_not_snapshot() {
+    let mut session = RemoteSession::with_session_id(80, 24, 42);
+
+    session.add_client(1, 4);
+    session.frame_store.advance_state();
+    session.record_state_snapshot();
+
+    let _ = session.get_render_update(1);
+    let token_bytes = session.generate_resume_token(1);
+
+    session.remove_client(1);
+
+    session.frame_store.advance_state();
+    session.record_state_snapshot();
+
+    let result = session.try_resume(&token_bytes, 4);
+    assert!(matches!(result, ResumeResult::Resumed { .. }));
+
+    let update = session.get_render_update(1);
+    assert!(matches!(update, Some(crate::session::RenderUpdate::Delta(_))));
+}
+
+#[test]
+fn test_resume_restores_input_seq() {
+    let mut session = RemoteSession::with_session_id(80, 24, 42);
+
+    session.add_client(1, 4);
+    session
+        .lease_manager
+        .request_control(1, Some(DisplaySize { cols: 80, rows: 24 }), false);
+
+    for seq in 1..=5 {
+        let _ = session.process_input(1, &make_input(seq, 100));
+    }
+
+    session.frame_store.advance_state();
+    session.record_state_snapshot();
+    let _ = session.get_render_update(1);
+
+    let token_bytes = session.generate_resume_token(1);
+    session.remove_client(1);
+
+    let result = session.try_resume(&token_bytes, 4);
+    assert!(matches!(result, ResumeResult::Resumed { .. }));
+
+    session
+        .lease_manager
+        .request_control(1, Some(DisplaySize { cols: 80, rows: 24 }), false);
+
+    let result = session.process_input(1, &make_input(6, 100));
+    assert!(result.is_ok());
+
+    let result = session.process_input(1, &make_input(5, 100));
+    assert!(matches!(result, Err(InputError::Duplicate)));
 }

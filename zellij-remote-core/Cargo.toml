@@ -8,6 +8,9 @@ license.workspace = true
 zellij-remote-protocol = { path = "../zellij-remote-protocol" }
 log = { workspace = true }
 prost = { workspace = true }
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
 
 [dev-dependencies]
 proptest = "1.4"
