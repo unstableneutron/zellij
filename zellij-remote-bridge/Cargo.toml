@@ -1,0 +1,26 @@
+[package]
+name = "zellij-remote-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zellij-remote-protocol = { path = "../zellij-remote-protocol" }
+zellij-utils = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = "0.7"
+wtransport = { version = "0.6", features = ["dangerous-configuration"] }
+anyhow = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+prost = { workspace = true }
+bytes = "1.5"
+dashmap = "5.5"
+rustls = "0.23"
+rcgen = "0.13"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = { workspace = true }
+env_logger = "0.11"
