@@ -1,9 +1,12 @@
 use anyhow::Result;
 use bytes::BytesMut;
 use prost::Message;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use zellij_remote_bridge::encode_envelope;
-use zellij_remote_core::{Cell, DeltaEngine, FrameStore, StyleTable};
+use zellij_remote_core::{Cell, DeltaEngine, Frame, FrameStore, StyleTable};
 use zellij_remote_protocol::{
     stream_envelope, Capabilities, ClientHello, ControllerLease, ControllerPolicy,
     ProtocolVersion, ServerHello, SessionState, StreamEnvelope,
@@ -11,6 +14,29 @@ use zellij_remote_protocol::{
 
 const SCREEN_COLS: usize = 80;
 const SCREEN_ROWS: usize = 24;
+
+static CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Shared session state that persists across client connections
+struct SharedSession {
+    store: FrameStore,
+    style_table: StyleTable,
+    connection_count: u64,
+}
+
+impl SharedSession {
+    fn new() -> Self {
+        let mut store = FrameStore::new(SCREEN_COLS, SCREEN_ROWS);
+        draw_welcome_screen(&mut store);
+        store.advance_state();
+
+        Self {
+            store,
+            style_table: StyleTable::new(),
+            connection_count: 0,
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,6 +59,22 @@ async fn main() -> Result<()> {
 
     let server = wtransport::Endpoint::server(config)?;
 
+    // Shared session state - persists across connections
+    let session = Arc::new(RwLock::new(SharedSession::new()));
+
+    // Background task to update screen state
+    let session_updater = session.clone();
+    tokio::spawn(async move {
+        let mut counter = 0u32;
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let mut session = session_updater.write().await;
+            update_animation(&mut session.store, counter);
+            session.store.advance_state();
+            counter += 1;
+        }
+    });
+
     log::info!("WebTransport server listening on {}", listen_addr);
 
     loop {
@@ -45,87 +87,164 @@ async fn main() -> Result<()> {
         );
 
         let connection = session_request.accept().await?;
+        let session = session.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(connection).await {
+            if let Err(e) = handle_connection(connection, session).await {
                 log::error!("Connection error: {}", e);
             }
         });
     }
 }
 
-async fn handle_connection(connection: wtransport::Connection) -> Result<()> {
+async fn handle_connection(
+    connection: wtransport::Connection,
+    session: Arc<RwLock<SharedSession>>,
+) -> Result<()> {
     let (mut send, mut recv) = connection.accept_bi().await?;
+
+    let client_id = CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    // Track connection
+    {
+        let mut s = session.write().await;
+        s.connection_count += 1;
+        log::info!(
+            "Client {} connected (total connections: {})",
+            client_id,
+            s.connection_count
+        );
+    }
 
     // === HANDSHAKE ===
     let client_hello = read_client_hello(&mut recv).await?;
-    log::info!("Received ClientHello from {}", client_hello.client_name);
+    log::info!(
+        "Received ClientHello from {} (client_id={})",
+        client_hello.client_name,
+        client_id
+    );
 
-    let server_hello = build_server_hello(&client_hello);
+    // Check if client wants to resume
+    let resume_state_id = if !client_hello.resume_token.is_empty() {
+        // Parse resume token as state_id (simple implementation)
+        let bytes: [u8; 8] = client_hello
+            .resume_token
+            .get(..8)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 8]);
+        let state_id = u64::from_le_bytes(bytes);
+        log::info!("Client requesting resume from state_id={}", state_id);
+        Some(state_id)
+    } else {
+        None
+    };
+
+    let server_hello = build_server_hello(&client_hello, client_id);
     let encoded = encode_envelope(&StreamEnvelope {
         msg: Some(stream_envelope::Msg::ServerHello(server_hello)),
     })?;
     send.write_all(&encoded).await?;
-    log::info!("Sent ServerHello");
+    log::info!("Sent ServerHello to client {}", client_id);
 
-    // === SEND INITIAL SNAPSHOT ===
-    let mut store = FrameStore::new(SCREEN_COLS, SCREEN_ROWS);
-    let mut style_table = StyleTable::new();
+    // === SEND INITIAL STATE ===
+    let (current_state_id, snapshot_or_delta) = {
+        let session = session.read().await;
+        let current_state_id = session.store.current_state_id();
 
-    // Draw initial content
-    draw_welcome_screen(&mut store);
-    store.advance_state();
-
-    let snapshot = DeltaEngine::compute_snapshot(
-        store.current_frame(),
-        &mut style_table,
-        store.current_state_id(),
-    );
-
-    let encoded = encode_envelope(&StreamEnvelope {
-        msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot)),
-    })?;
-    send.write_all(&encoded).await?;
-    log::info!("Sent ScreenSnapshot (state_id={})", store.current_state_id());
-
-    // === SEND PERIODIC DELTAS ===
-    let mut counter = 0u32;
-    loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let baseline = store.snapshot();
-        
-        // Update the screen with animation
-        update_animation(&mut store, counter);
-        store.advance_state();
-
-        let delta = DeltaEngine::compute_delta(
-            &baseline.data,
-            store.current_frame(),
-            &mut style_table,
-            baseline.state_id,
-            store.current_state_id(),
-        );
-
-        if !delta.row_patches.is_empty() || delta.cursor.is_some() {
-            let encoded = encode_envelope(&StreamEnvelope {
-                msg: Some(stream_envelope::Msg::ScreenDeltaStream(delta)),
-            })?;
-            send.write_all(&encoded).await?;
-            log::debug!(
-                "Sent ScreenDelta (state_id={}, patches={})",
-                store.current_state_id(),
-                counter
-            );
+        if let Some(resume_id) = resume_state_id {
+            if resume_id < current_state_id {
+                // Client has old state, send delta
+                // Note: In real impl, we'd need to keep history. For demo, just send snapshot.
+                log::info!(
+                    "Client resume_id={} < current={}, sending snapshot",
+                    resume_id,
+                    current_state_id
+                );
+            }
         }
 
-        counter += 1;
-        if counter > 100 {
-            break;
+        // Always send snapshot for now (delta resume requires state history)
+        let snapshot = DeltaEngine::compute_snapshot(
+            session.store.current_frame(),
+            &mut session.style_table.clone(),
+            current_state_id,
+        );
+        (current_state_id, snapshot)
+    };
+
+    let encoded = encode_envelope(&StreamEnvelope {
+        msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot_or_delta)),
+    })?;
+    send.write_all(&encoded).await?;
+    log::info!(
+        "Sent ScreenSnapshot (state_id={}) to client {}",
+        current_state_id,
+        client_id
+    );
+
+    // === STREAM DELTAS ===
+    let mut last_sent_state_id = current_state_id;
+    let mut last_snapshot: Option<Frame> = None;
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (current_state_id, maybe_delta) = {
+            let session = session.read().await;
+            let current_id = session.store.current_state_id();
+
+            if current_id > last_sent_state_id {
+                let current_frame = session.store.snapshot();
+
+                let delta = if let Some(ref baseline) = last_snapshot {
+                    DeltaEngine::compute_delta(
+                        &baseline.data,
+                        &current_frame.data,
+                        &mut session.style_table.clone(),
+                        last_sent_state_id,
+                        current_id,
+                    )
+                } else {
+                    // No baseline, compute from empty
+                    DeltaEngine::compute_delta(
+                        &FrameStore::new(SCREEN_COLS, SCREEN_ROWS).snapshot().data,
+                        &current_frame.data,
+                        &mut session.style_table.clone(),
+                        last_sent_state_id,
+                        current_id,
+                    )
+                };
+
+                (current_id, Some((delta, current_frame)))
+            } else {
+                (current_id, None)
+            }
+        };
+
+        if let Some((delta, frame)) = maybe_delta {
+            if !delta.row_patches.is_empty() || delta.cursor.is_some() {
+                let encoded = encode_envelope(&StreamEnvelope {
+                    msg: Some(stream_envelope::Msg::ScreenDeltaStream(delta)),
+                })?;
+
+                if let Err(e) = send.write_all(&encoded).await {
+                    log::warn!("Failed to send delta to client {}: {}", client_id, e);
+                    break;
+                }
+
+                log::debug!(
+                    "Sent ScreenDelta (state_id={}) to client {}",
+                    current_state_id,
+                    client_id
+                );
+            }
+
+            last_sent_state_id = current_state_id;
+            last_snapshot = Some(frame);
         }
     }
 
-    log::info!("Demo complete, closing connection");
+    log::info!("Client {} disconnected", client_id);
     Ok(())
 }
 
@@ -184,7 +303,7 @@ fn decode_envelope(buf: &mut BytesMut) -> Result<Option<StreamEnvelope>> {
     Ok(Some(envelope))
 }
 
-fn build_server_hello(client_hello: &ClientHello) -> ServerHello {
+fn build_server_hello(client_hello: &ClientHello, client_id: u64) -> ServerHello {
     let negotiated_caps = Capabilities {
         supports_datagrams: client_hello
             .capabilities
@@ -206,18 +325,18 @@ fn build_server_hello(client_hello: &ClientHello) -> ServerHello {
             minor: zellij_remote_protocol::ZRP_VERSION_MINOR,
         }),
         negotiated_capabilities: Some(negotiated_caps),
-        client_id: 1,
+        client_id,
         session_name: "spike-demo".to_string(),
         session_state: SessionState::Running.into(),
         lease: Some(ControllerLease {
             lease_id: 1,
-            owner_client_id: 1,
+            owner_client_id: client_id,
             policy: ControllerPolicy::LastWriterWins.into(),
             current_size: None,
             remaining_ms: 30000,
             duration_ms: 30000,
         }),
-        resume_token: vec![],
+        resume_token: vec![], // Server could send token for client to use on reconnect
         snapshot_interval_ms: 5000,
         max_inflight_inputs: 256,
         render_window: zellij_remote_protocol::DEFAULT_RENDER_WINDOW,
@@ -234,21 +353,21 @@ fn draw_welcome_screen(store: &mut FrameStore) {
         empty,
         "║                     🦎 Zellij Remote Protocol Demo 🦎                       ║",
         empty,
-        "║  This is a live demo of the ZRP protocol over WebTransport/QUIC.           ║",
+        "║  This server maintains PERSISTENT SESSION STATE across connections.        ║",
         empty,
-        "║  The server is sending:                                                     ║",
-        "║    • Initial ScreenSnapshot (full screen state)                            ║",
-        "║    • Periodic ScreenDelta updates (incremental changes)                    ║",
+        "║  • Disconnect and reconnect - you'll see the same counter value           ║",
+        "║  • Multiple clients can connect simultaneously                             ║",
+        "║  • State continues updating even with no clients                          ║",
         empty,
-        "║  Watch the counter below update in real-time:                              ║",
+        "║  Watch the counter below - it persists across reconnections:              ║",
         empty,
         "║                                                                              ║",
         empty,
         "║  Protocol features demonstrated:                                            ║",
-        "║    ✓ WebTransport/QUIC transport                                           ║",
-        "║    ✓ Protobuf message encoding                                             ║",
-        "║    ✓ Length-prefixed framing                                               ║",
+        "║    ✓ Session persistence                                                   ║",
+        "║    ✓ Multiple client support                                               ║",
         "║    ✓ Cumulative delta updates                                              ║",
+        "║    ✓ Graceful disconnect handling                                          ║",
         empty,
         bottom,
     ];

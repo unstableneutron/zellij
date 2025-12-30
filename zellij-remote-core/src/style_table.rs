@@ -15,6 +15,7 @@ impl StyleKey {
     }
 }
 
+#[derive(Clone)]
 pub struct StyleTable {
     styles: Vec<Style>,
     style_to_id: HashMap<StyleKey, u16>,
