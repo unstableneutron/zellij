@@ -11,13 +11,17 @@ use zellij_remote_protocol::{
 async fn main() -> Result<()> {
     env_logger::init();
 
+    let server_url = std::env::var("SERVER_URL")
+        .unwrap_or_else(|_| "https://127.0.0.1:4433".to_string());
+
     let config = ClientConfig::builder()
         .with_bind_default()
         .with_no_cert_validation()
         .build();
 
+    println!("Connecting to {}...", server_url);
     let connection = Endpoint::client(config)?
-        .connect("https://127.0.0.1:4433")
+        .connect(&server_url)
         .await
         .context("failed to connect to server")?;
 

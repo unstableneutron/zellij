@@ -5,9 +5,17 @@ use zellij_remote_bridge::{BridgeConfig, RemoteBridge};
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let config = BridgeConfig::default();
+    let listen_addr = std::env::var("LISTEN_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:4433".to_string())
+        .parse()
+        .expect("Invalid LISTEN_ADDR");
+
+    let config = BridgeConfig {
+        listen_addr,
+        ..Default::default()
+    };
     let bridge = RemoteBridge::new(config);
 
-    println!("Starting spike server on 127.0.0.1:4433");
+    println!("Starting spike server on {}", listen_addr);
     bridge.run().await
 }
