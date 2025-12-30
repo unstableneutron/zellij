@@ -8,7 +8,14 @@ fn test_delta_detects_changed_rows() {
     let baseline = store.snapshot();
 
     store.update_row(5, |row| {
-        row.set_cell(0, Cell { codepoint: 'X' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'X' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.advance_state();
 
@@ -33,7 +40,14 @@ fn test_delta_uses_arc_pointer_equality() {
     let baseline = store.snapshot();
 
     store.update_row(0, |row| {
-        row.set_cell(0, Cell { codepoint: 'A' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'A' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.advance_state();
 
@@ -88,10 +102,24 @@ fn test_snapshot_includes_all_rows() {
     let mut store = FrameStore::new(80, 24);
 
     store.update_row(0, |row| {
-        row.set_cell(0, Cell { codepoint: 'A' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'A' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.update_row(23, |row| {
-        row.set_cell(79, Cell { codepoint: 'Z' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            79,
+            Cell {
+                codepoint: 'Z' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.advance_state();
 
@@ -110,7 +138,14 @@ fn test_delta_state_ids() {
     let baseline = store.snapshot();
 
     store.update_row(0, |row| {
-        row.set_cell(0, Cell { codepoint: 'X' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'X' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.advance_state();
 
@@ -133,8 +168,22 @@ fn test_delta_state_ids() {
 fn test_row_patch_array_lengths_match() {
     let mut store = FrameStore::new(80, 24);
     store.update_row(0, |row| {
-        row.set_cell(0, Cell { codepoint: 'A' as u32, width: 1, style_id: 0 });
-        row.set_cell(79, Cell { codepoint: 'Z' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'A' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
+        row.set_cell(
+            79,
+            Cell {
+                codepoint: 'Z' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.advance_state();
 
@@ -162,7 +211,14 @@ fn test_row_patch_array_lengths_match() {
 fn test_snapshot_row_data_array_lengths_match() {
     let mut store = FrameStore::new(80, 24);
     store.update_row(0, |row| {
-        row.set_cell(0, Cell { codepoint: 'X' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'X' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.advance_state();
 
@@ -199,7 +255,11 @@ fn test_delta_with_fewer_rows_than_baseline() {
 
     // Delta should only contain patches for rows that exist in current
     for patch in &delta.row_patches {
-        assert!(patch.row < 10, "Patch row {} exceeds current row count 10", patch.row);
+        assert!(
+            patch.row < 10,
+            "Patch row {} exceeds current row count 10",
+            patch.row
+        );
     }
 }
 
@@ -210,7 +270,14 @@ fn test_delta_with_more_rows_than_baseline() {
 
     let mut current_store = FrameStore::new(80, 24); // More rows
     current_store.update_row(20, |row| {
-        row.set_cell(0, Cell { codepoint: 'X' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'X' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     current_store.advance_state();
     let current = current_store.snapshot();
@@ -227,7 +294,11 @@ fn test_delta_with_more_rows_than_baseline() {
 
     // Should include patches for new rows (10-23)
     let new_row_patches: Vec<_> = delta.row_patches.iter().filter(|p| p.row >= 10).collect();
-    assert_eq!(new_row_patches.len(), 14, "Should have patches for rows 10-23");
+    assert_eq!(
+        new_row_patches.len(),
+        14,
+        "Should have patches for rows 10-23"
+    );
 }
 
 #[test]

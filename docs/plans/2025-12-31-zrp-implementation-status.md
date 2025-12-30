@@ -14,9 +14,9 @@ The Zellij Remote Protocol (ZRP) enables Mosh-style remote terminal access over 
 | Phase 1 | Core State Management | ✅ Complete |
 | Phase 2 | WebTransport Server | ✅ Complete |
 | Phase 2.5 | End-to-End Render Demo | ✅ Complete |
-| Phase 3 | Backpressure & Flow Control | 🔲 Not Started |
-| Phase 4 | Controller Lease | 🔲 Not Started |
-| Phase 5 | Input Handling | 🔲 Not Started |
+| Phase 3 | Backpressure & Flow Control | ✅ Complete |
+| Phase 4 | Controller Lease | ✅ Complete |
+| Phase 5 | Input Handling | ✅ Complete |
 | Phase 6 | Client-side Prediction | 🔲 Not Started |
 | Phase 7 | Mobile Client Library | 🔲 Not Started |
 
@@ -36,12 +36,18 @@ zellij-remote-core/       # State management
     ├── style_table.rs    # O(1) style lookup
     ├── delta.rs          # DeltaEngine (cumulative deltas)
     ├── render_seq.rs     # Latest-wins datagram semantics
-    └── tests/            # 41 tests including proptest
+    ├── backpressure.rs   # RenderWindow for flow control
+    ├── client_state.rs   # ClientRenderState (per-client baselines)
+    ├── lease.rs          # LeaseManager (controller lease state machine)
+    ├── input.rs          # InputReceiver/InputSender (reliable input)
+    ├── rtt.rs            # RttEstimator (EWMA RTT estimation)
+    ├── session.rs        # RemoteSession (aggregates all state)
+    └── tests/            # 91 tests including proptest
 
 zellij-remote-bridge/     # WebTransport server
 ├── examples/
-│   ├── spike_server.rs   # Test server (configurable via LISTEN_ADDR)
-│   └── spike_client.rs   # Test client (configurable via SERVER_URL)
+│   ├── spike_server.rs   # Test server with full input handling
+│   └── spike_client.rs   # Interactive client with keyboard input
 └── src/
     ├── framing.rs        # Length-prefixed protobuf framing
     ├── handshake.rs      # Generic over AsyncRead/AsyncWrite
@@ -51,12 +57,12 @@ zellij-remote-bridge/     # WebTransport server
 
 ## Test Coverage
 
-**Total: 151 tests**
+**Total: 201+ tests**
 
 | Package | Unit Tests | Integration Tests | Property-Based |
 |---------|------------|-------------------|----------------|
 | zellij-remote-protocol | 89 | - | - |
-| zellij-remote-core | 35 | - | 6 (proptest) |
+| zellij-remote-core | 85 | - | 6 (proptest) |
 | zellij-remote-bridge | 15 | 6 | - |
 
 ### Key Test Categories
@@ -64,6 +70,11 @@ zellij-remote-bridge/     # WebTransport server
 - **Protocol roundtrip**: All message types encode/decode correctly
 - **Frame store**: Arc sharing, dirty tracking, resize edge cases
 - **Delta engine**: Array length invariants, size mismatch handling
+- **Backpressure**: Window tracking, ack handling, snapshot forcing
+- **Lease**: State machine transitions, policies, viewer mode
+- **Input**: Sequencing, deduplication, controller gating
+- **RTT**: EWMA smoothing, RTO calculation
+- **Session**: Multi-client, baseline advancement
 - **Framing**: Partial reads, multiple frames, corruption handling
 - **Handshake**: Success, errors, capability negotiation
 
@@ -74,7 +85,7 @@ zellij-remote-bridge/     # WebTransport server
 # Terminal 1 - Server
 RUST_LOG=info cargo run --example spike_server -p zellij-remote-bridge
 
-# Terminal 2 - Interactive client (renders to terminal)
+# Terminal 2 - Interactive client with keyboard input
 cargo run --example spike_client -p zellij-remote-bridge
 
 # Or headless mode for testing
@@ -92,7 +103,7 @@ LISTEN_ADDR=0.0.0.0:4433 ./spike_server
 SERVER_URL="https://100.69.153.168:4433" cargo run --example spike_client -p zellij-remote-bridge
 ```
 
-**Result:** Full render pipeline works over Tailscale mesh.
+**Result:** Full render + input pipeline works over Tailscale mesh.
 
 ### Network Resilience Testing
 
@@ -101,15 +112,10 @@ SERVER_URL="https://100.69.153.168:4433" cargo run --example spike_client -p zel
 | Client disconnect mid-stream | ✅ Server continues, logs warning |
 | Reconnection after disconnect | ✅ Client gets current state (higher state_id) |
 | Session persistence | ✅ Background updates continue without clients |
-| Multiple clients | ✅ Each gets unique client_id |
+| Multiple clients | ✅ Each gets unique client_id, viewers receive updates |
 | Cross-machine reconnect | ✅ Mac → sjc3, state_id 6→19 after 3s gap |
-
-**Test output example:**
-```
-First connection:  client_id=1, state_id=6
-(disconnect, wait 3 seconds)
-Second connection: client_id=2, state_id=19  ← state persisted!
-```
+| Input from controller | ✅ Echoed to screen |
+| Input from viewer | ✅ Rejected with NotController error |
 
 ## Build Requirements
 
@@ -140,58 +146,49 @@ apt-get install protobuf-compiler  # For prost-build
 - Delta computation uses `Arc::ptr_eq()` for O(1) comparison
 - Copy-on-write via `Arc::make_mut()` on modification
 
-### 4. Cumulative Deltas (No Chains)
-- Each delta is computed from client's last-acked baseline
-- Datagram loss doesn't break delta chain (there is no chain)
-- Client can skip intermediate states safely
+### 4. Ack-Driven Baselines (Critical Fix)
+- Delta baselines are only advanced on StateAck receipt
+- Prevents "delta chain" issues when datagrams are lost
+- Pending frames tracked until acknowledged
+
+### 5. Controller Lease Model
+- Only one client can control resize/input at a time
+- ExplicitOnly vs LastWriterWins policies
+- Viewers receive updates but cannot send input
+- Lease expiration without keepalive
+
+### 6. Per-Client Input Tracking
+- Each client has independent input sequence numbers
+- Controller gating prevents unauthorized input
+- RTT estimation via echoed timestamps
 
 ## Next Steps
 
 ### Immediate (High Value)
 
-#### 1. Input Handling (Phase 5)
-Enable bidirectional communication:
-- Client sends `InputEvent` (keyboard/mouse)
-- Server routes to session, sends `InputAck`
-- Enables interactive terminal use
-
-#### 2. Zellij Integration
+#### 1. Zellij Integration
 Connect to real Zellij sessions:
 - Hook into existing render pipeline output
 - Parse ANSI sequences into FrameStore
 - Route input events to PTY
 - Attach to existing sessions by name
 
-### Medium Term
-
-#### 3. Resume Tokens
+#### 2. Resume Tokens
 True Mosh-style resumption:
 - Server sends resume_token in ServerHello
 - Client stores and sends on reconnect
 - Server sends delta from last-acked state (not full snapshot)
 - Requires: state history buffer
 
-#### 4. Controller Lease (Phase 4)
-Multi-client resize coordination:
-- Lease acquisition/release protocol
-- Handle lease timeouts and takeover
-- Smallest-client-wins or explicit control
-
-#### 5. Backpressure (Phase 3)
-Flow control for slow clients:
-- Render window (max unacked state_ids)
-- StateAck message handling
-- Snapshot fallback when window exhausted
-
 ### Future
 
-#### 6. Client-side Prediction (Phase 6)
+#### 3. Client-side Prediction (Phase 6)
 Local echo for low-latency feel:
 - Predict character echo
 - Reconcile with server state
 - Handle mispredictions gracefully
 
-#### 7. Mobile Client Library (Phase 7)
+#### 4. Mobile Client Library (Phase 7)
 UniFFI bindings for iOS/Android:
 - Swift/Kotlin wrappers
 - Native UI rendering
@@ -204,5 +201,6 @@ See [2024-12-30-zellij-remote-protocol-v2.md](./2024-12-30-zellij-remote-protoco
 Key decisions:
 - **Input**: Reliable QUIC streams (not datagrams) for exactly-once delivery
 - **Render**: Datagrams for small deltas, stream fallback for large
-- **State**: Per-client baselines, cumulative deltas
+- **State**: Per-client ack-driven baselines, cumulative deltas
+- **Lease**: Controller model for resize/input coordination
 - **Prediction**: Deferred until correctness proven

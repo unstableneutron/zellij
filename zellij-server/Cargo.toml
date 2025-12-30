@@ -57,6 +57,14 @@ version = "0.51.1"
 default-features = false
 features = ["std"]
 
+[dependencies.zellij-remote-core]
+path = "../zellij-remote-core"
+optional = true
+
+[dependencies.zellij-remote-protocol]
+path = "../zellij-remote-protocol"
+optional = true
+
 [dev-dependencies]
 insta = "1.6.0"
 tempfile = "3.2.0"
@@ -64,3 +72,4 @@ wasmi = { version = "0.51.1", features = ["std"] }
 
 [features]
 web_server_capability = ["zellij-utils/web_server_capability"]
+remote = ["zellij-remote-core", "zellij-remote-protocol"]

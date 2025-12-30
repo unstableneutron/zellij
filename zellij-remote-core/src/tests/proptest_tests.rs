@@ -1,7 +1,7 @@
-use proptest::prelude::*;
 use crate::delta::DeltaEngine;
 use crate::frame::{Cell, FrameStore};
 use crate::style_table::StyleTable;
+use proptest::prelude::*;
 use std::sync::Arc;
 
 fn dimension_strategy() -> impl Strategy<Value = usize> {

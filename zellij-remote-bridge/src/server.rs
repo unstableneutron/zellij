@@ -90,7 +90,7 @@ impl RemoteBridge {
                 log::warn!("No TLS cert configured, generating self-signed certificate");
                 Identity::self_signed(["localhost"])
                     .map_err(|e| anyhow::anyhow!("failed to create self-signed identity: {}", e))
-            }
+            },
         }
     }
 }

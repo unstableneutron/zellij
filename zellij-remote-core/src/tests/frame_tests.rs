@@ -1,4 +1,4 @@
-use crate::frame::{Cell, Row, FrameStore};
+use crate::frame::{Cell, FrameStore, Row};
 use std::sync::Arc;
 
 #[test]
@@ -16,7 +16,14 @@ fn test_row_modification_clones() {
     let mut row2 = row1.clone();
 
     // Modify row2
-    row2.set_cell(0, Cell { codepoint: 'A' as u32, width: 1, style_id: 0 });
+    row2.set_cell(
+        0,
+        Cell {
+            codepoint: 'A' as u32,
+            width: 1,
+            style_id: 0,
+        },
+    );
 
     // Now they should be different Arcs
     assert!(!Arc::ptr_eq(&row1.0, &row2.0));
@@ -32,7 +39,14 @@ fn test_frame_store_baseline_tracking() {
 
     // Modify a row
     store.update_row(0, |row| {
-        row.set_cell(0, Cell { codepoint: 'X' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'X' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.advance_state();
 
@@ -50,10 +64,24 @@ fn test_dirty_row_tracking() {
     let mut store = FrameStore::new(80, 24);
 
     store.update_row(5, |row| {
-        row.set_cell(0, Cell { codepoint: 'A' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'A' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.update_row(10, |row| {
-        row.set_cell(0, Cell { codepoint: 'B' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'B' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
 
     let dirty = store.take_dirty_rows();
@@ -92,7 +120,10 @@ fn test_resize_expand_rows() {
     assert_eq!(store.current_frame().rows.len(), 20);
     // New rows should be default-initialized
     for i in 10..20 {
-        assert_eq!(store.current_frame().rows[i].get_cell(0).unwrap().codepoint, ' ' as u32);
+        assert_eq!(
+            store.current_frame().rows[i].get_cell(0).unwrap().codepoint,
+            ' ' as u32
+        );
     }
 }
 
@@ -100,7 +131,14 @@ fn test_resize_expand_rows() {
 fn test_resize_shrink_rows() {
     let mut store = FrameStore::new(80, 24);
     store.update_row(20, |row| {
-        row.set_cell(0, Cell { codepoint: 'X' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'X' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     store.resize(80, 10);
     assert_eq!(store.current_frame().rows.len(), 10);
@@ -121,7 +159,14 @@ fn test_resize_marks_all_rows_dirty() {
 #[test]
 fn test_set_cell_out_of_bounds_ignored() {
     let mut row = Row::new(10);
-    row.set_cell(100, Cell { codepoint: 'X' as u32, width: 1, style_id: 0 });
+    row.set_cell(
+        100,
+        Cell {
+            codepoint: 'X' as u32,
+            width: 1,
+            style_id: 0,
+        },
+    );
     // Should not panic, cell at 100 doesn't exist
     assert!(row.get_cell(100).is_none());
 }
@@ -130,7 +175,14 @@ fn test_set_cell_out_of_bounds_ignored() {
 fn test_update_row_out_of_bounds_ignored() {
     let mut store = FrameStore::new(80, 10);
     store.update_row(100, |row| {
-        row.set_cell(0, Cell { codepoint: 'X' as u32, width: 1, style_id: 0 });
+        row.set_cell(
+            0,
+            Cell {
+                codepoint: 'X' as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
     });
     // Should not panic, dirty rows should not include 100
     let dirty = store.take_dirty_rows();

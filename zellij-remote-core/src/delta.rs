@@ -2,8 +2,8 @@ use crate::frame::{CursorShape, FrameData, Row};
 use crate::style_table::StyleTable;
 use std::sync::Arc;
 use zellij_remote_protocol::{
-    CellRun, CursorState, DisplaySize, RowData, RowPatch, ScreenDelta, ScreenSnapshot, StyleDef,
-    CursorShape as ProtoCursorShape,
+    CellRun, CursorShape as ProtoCursorShape, CursorState, DisplaySize, RowData, RowPatch,
+    ScreenDelta, ScreenSnapshot, StyleDef,
 };
 
 pub struct DeltaEngine;

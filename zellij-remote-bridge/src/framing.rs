@@ -30,7 +30,7 @@ pub fn decode_envelope(buf: &mut BytesMut) -> Result<DecodeResult<StreamEnvelope
                 return Ok(DecodeResult::Incomplete);
             }
             anyhow::bail!("invalid varint in frame header");
-        }
+        },
     };
 
     let varint_len = buf.len() - peek.len();
@@ -79,14 +79,14 @@ mod tests {
         let original = make_client_hello();
         let encoded = encode_envelope(&original).unwrap();
         let mut buf = BytesMut::from(&encoded[..]);
-        
+
         match decode_envelope(&mut buf).unwrap() {
             DecodeResult::Complete(decoded) => {
                 assert_eq!(original, decoded);
-            }
+            },
             DecodeResult::Incomplete => panic!("expected complete decode"),
         }
-        
+
         assert!(buf.is_empty(), "buffer should be consumed");
     }
 
@@ -94,19 +94,25 @@ mod tests {
     fn test_partial_varint_returns_incomplete() {
         // Feed only 0 bytes
         let mut buf = BytesMut::new();
-        assert!(matches!(decode_envelope(&mut buf).unwrap(), DecodeResult::Incomplete));
+        assert!(matches!(
+            decode_envelope(&mut buf).unwrap(),
+            DecodeResult::Incomplete
+        ));
     }
 
     #[test]
     fn test_partial_body_returns_incomplete() {
         let original = make_client_hello();
         let encoded = encode_envelope(&original).unwrap();
-        
+
         // Feed varint + partial body
         let partial_len = encoded.len() / 2;
         let mut buf = BytesMut::from(&encoded[..partial_len]);
-        
-        assert!(matches!(decode_envelope(&mut buf).unwrap(), DecodeResult::Incomplete));
+
+        assert!(matches!(
+            decode_envelope(&mut buf).unwrap(),
+            DecodeResult::Incomplete
+        ));
     }
 
     #[test]
@@ -129,7 +135,7 @@ mod tests {
 
         let encoded1 = encode_envelope(&msg1).unwrap();
         let encoded2 = encode_envelope(&msg2).unwrap();
-        
+
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&encoded1);
         buf.extend_from_slice(&encoded2);
@@ -153,28 +159,28 @@ mod tests {
     fn test_feed_one_byte_at_a_time() {
         let original = make_client_hello();
         let encoded = encode_envelope(&original).unwrap();
-        
+
         let mut buf = BytesMut::new();
-        
+
         for (i, &byte) in encoded.iter().enumerate() {
             buf.extend_from_slice(&[byte]);
-            
+
             match decode_envelope(&mut buf) {
                 Ok(DecodeResult::Incomplete) => {
                     // Expected for all but the last byte
                     if i == encoded.len() - 1 {
                         panic!("should have completed on last byte");
                     }
-                }
+                },
                 Ok(DecodeResult::Complete(decoded)) => {
                     assert_eq!(i, encoded.len() - 1, "should only complete on last byte");
                     assert_eq!(original, decoded);
                     return;
-                }
+                },
                 Err(e) => panic!("unexpected error: {}", e),
             }
         }
-        
+
         panic!("never completed");
     }
 
@@ -182,7 +188,7 @@ mod tests {
     fn test_invalid_varint_after_max_length() {
         // Create a buffer with invalid varint (all high bits set, more than 10 bytes)
         let mut buf = BytesMut::from(&[0xFF; 11][..]);
-        
+
         let result = decode_envelope(&mut buf);
         assert!(result.is_err(), "should error on invalid varint");
     }
@@ -191,7 +197,7 @@ mod tests {
     fn test_decode_corrupted_protobuf() {
         // Valid varint (length 5) followed by garbage
         let mut buf = BytesMut::from(&[5u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF][..]);
-        
+
         let result = decode_envelope(&mut buf);
         assert!(result.is_err(), "should error on corrupted protobuf");
     }
@@ -201,11 +207,11 @@ mod tests {
         let envelope = StreamEnvelope { msg: None };
         let encoded = encode_envelope(&envelope).unwrap();
         let mut buf = BytesMut::from(&encoded[..]);
-        
+
         match decode_envelope(&mut buf).unwrap() {
             DecodeResult::Complete(decoded) => {
                 assert_eq!(envelope, decoded);
-            }
+            },
             DecodeResult::Incomplete => panic!("expected complete"),
         }
     }

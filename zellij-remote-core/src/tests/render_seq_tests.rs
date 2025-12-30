@@ -1,4 +1,4 @@
-use crate::render_seq::{DatagramDecision, RenderSeqTracker, RenderSender};
+use crate::render_seq::{DatagramDecision, RenderSender, RenderSeqTracker};
 
 #[test]
 fn test_newer_seq_accepted() {

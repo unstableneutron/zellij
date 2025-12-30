@@ -15,11 +15,14 @@ LISTEN_ADDR=0.0.0.0:4433 cargo run --example spike_server -p zellij-remote-bridg
 
 ### Run the Test Client
 ```bash
-# Connect to localhost
+# Connect to localhost (interactive with keyboard input)
 cargo run --example spike_client -p zellij-remote-bridge
 
 # Connect to remote server
 SERVER_URL="https://100.69.153.168:4433" cargo run --example spike_client -p zellij-remote-bridge
+
+# Headless mode for testing
+HEADLESS=1 cargo run --example spike_client -p zellij-remote-bridge
 ```
 
 ## Crates
@@ -28,7 +31,7 @@ SERVER_URL="https://100.69.153.168:4433" cargo run --example spike_client -p zel
 Protobuf message definitions for the ZRP protocol.
 
 ```rust
-use zellij_remote_protocol::{ClientHello, ServerHello, ScreenDelta, ScreenSnapshot};
+use zellij_remote_protocol::{ClientHello, ServerHello, ScreenDelta, ScreenSnapshot, InputEvent, InputAck};
 ```
 
 Key messages:
@@ -37,26 +40,48 @@ Key messages:
 - `ScreenDelta` - Incremental updates (row patches)
 - `InputEvent` / `InputAck` - Keyboard/mouse input with acknowledgment
 - `ControllerLease` - Resize control coordination
+- `StateAck` - Client acknowledges applied render state
 
 ### zellij-remote-core
 Core state management for efficient multi-client rendering.
 
 ```rust
-use zellij_remote_core::{FrameStore, DeltaEngine, StyleTable};
+use zellij_remote_core::{RemoteSession, RenderUpdate, LeaseResult, InputError};
 
-let mut store = FrameStore::new(80, 24);
-store.update_row(0, |row| {
-    row.set_cell(0, Cell { codepoint: 'H' as u32, width: 1, style_id: 0 });
-});
-store.advance_state();
+// Create a session
+let mut session = RemoteSession::new(80, 24);
 
-let delta = DeltaEngine::compute_delta(&baseline, &current, &mut styles, base_id, current_id);
+// Add a client
+session.add_client(client_id, 4 /* render window size */);
+
+// Grant control to client
+if let LeaseResult::Granted(lease) = session.lease_manager.request_control(client_id, None, false) {
+    // Client is now controller
+}
+
+// Process input from controller
+match session.process_input(client_id, &input_event) {
+    Ok(ack) => { /* send ack to client */ }
+    Err(InputError::NotController) => { /* reject */ }
+    Err(e) => { /* handle error */ }
+}
+
+// Get render update for client
+match session.get_render_update(client_id) {
+    Some(RenderUpdate::Snapshot(snapshot)) => { /* send snapshot */ }
+    Some(RenderUpdate::Delta(delta)) => { /* send delta */ }
+    None => { /* nothing to send */ }
+}
 ```
 
-Features:
-- `Arc<Row>` sharing - unchanged rows share memory across clients
-- O(1) delta detection via `Arc::ptr_eq()`
-- Cumulative deltas from per-client baselines (no delta chains)
+Key components:
+- `RemoteSession` - Aggregates all session state
+- `FrameStore` - Screen buffer with `Arc<Row>` sharing
+- `DeltaEngine` - Computes cumulative deltas
+- `LeaseManager` - Controller lease state machine
+- `RenderWindow` - Backpressure/flow control
+- `InputReceiver/InputSender` - Reliable input handling
+- `RttEstimator` - RTT estimation for latency tracking
 
 ### zellij-remote-bridge
 WebTransport server implementation.
@@ -83,23 +108,34 @@ bridge.run().await?;
 ### State Sync
 - Server maintains authoritative screen state in `FrameStore`
 - Each client has a baseline `state_id` representing last-acked state
-- Deltas computed from client's baseline (cumulative, not chained)
-- Datagram loss handled gracefully - just send next delta from same baseline
+- Deltas computed from client's acked baseline (cumulative, not chained)
+- Baselines only advance on StateAck - prevents issues with lost datagrams
 
-### Capability Negotiation
+### Controller Lease
+- Only one client can control resize/input at a time
+- `ExplicitOnly` policy: explicit request required for takeover
+- `LastWriterWins` policy: new client can take over
+- Viewers receive render updates but cannot send input
+- Lease expires without keepalive
+
+### Message Flow
 ```
 Client                          Server
   |                               |
   |------- ClientHello --------->|  (version, capabilities)
   |<------ ServerHello ----------|  (negotiated caps, client_id, lease)
   |                               |
-  |------- AttachRequest ------->|  (mode, desired_role)
-  |<------ AttachResponse -------|  (ok, will_send_snapshot)
+  |------- RequestControl ------>|  (request lease)
+  |<------ GrantControl ---------|  (lease granted)
+  |                               |
   |<------ ScreenSnapshot -------|  (full state)
   |                               |
   |------- InputEvent ---------->|  (key/mouse, seq)
   |<------ InputAck -------------|  (acked_seq)
   |<------ ScreenDelta ----------|  (row patches)
+  |------- StateAck ------------>|  (acknowledge render)
+  |                               |
+  |------- KeepAliveLease ------>|  (extend lease)
 ```
 
 ## Testing
@@ -110,6 +146,11 @@ cargo test -p zellij-remote-protocol -p zellij-remote-core -p zellij-remote-brid
 
 # Run with logging
 RUST_LOG=debug cargo test -p zellij-remote-bridge -- --nocapture
+
+# Test specific category
+cargo test -p zellij-remote-core -- lease_tests
+cargo test -p zellij-remote-core -- input_tests
+cargo test -p zellij-remote-core -- backpressure_tests
 ```
 
 ## Implementation Status
@@ -123,8 +164,11 @@ See [docs/plans/2024-12-31-zrp-implementation-status.md](plans/2024-12-31-zrp-im
 - ✅ ScreenSnapshot / ScreenDelta rendering
 - ✅ Session persistence across reconnections
 - ✅ Cross-machine verification (Tailscale)
-- 🔲 Input handling
+- ✅ Backpressure & flow control
+- ✅ Controller lease
+- ✅ Input handling with acknowledgment
+- ✅ RTT estimation
 - 🔲 Zellij integration
 - 🔲 Resume tokens
-- 🔲 Controller lease
 - 🔲 Client-side prediction
+- 🔲 Mobile client library

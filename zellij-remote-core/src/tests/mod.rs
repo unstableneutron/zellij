@@ -1,5 +1,10 @@
+mod backpressure_tests;
 mod delta_tests;
 mod frame_tests;
+mod input_tests;
+mod lease_tests;
 mod proptest_tests;
 mod render_seq_tests;
+mod rtt_tests;
+mod session_tests;
 mod style_table_tests;

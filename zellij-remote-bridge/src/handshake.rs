@@ -39,39 +39,41 @@ where
         buffer.extend_from_slice(&chunk[..n]);
 
         match decode_envelope(&mut buffer)? {
-            DecodeResult::Complete(envelope) => {
-                match envelope.msg {
-                    Some(stream_envelope::Msg::ClientHello(client_hello)) => {
-                        log::info!("Received ClientHello from {}", client_hello.client_name);
+            DecodeResult::Complete(envelope) => match envelope.msg {
+                Some(stream_envelope::Msg::ClientHello(client_hello)) => {
+                    log::info!("Received ClientHello from {}", client_hello.client_name);
 
-                        let server_hello = build_server_hello(&client_hello, &session_name, client_id);
-                        let response = StreamEnvelope {
-                            msg: Some(stream_envelope::Msg::ServerHello(server_hello.clone())),
-                        };
-                        let encoded = encode_envelope(&response)?;
-                        writer.write_all(&encoded).await?;
+                    let server_hello = build_server_hello(&client_hello, &session_name, client_id);
+                    let response = StreamEnvelope {
+                        msg: Some(stream_envelope::Msg::ServerHello(server_hello.clone())),
+                    };
+                    let encoded = encode_envelope(&response)?;
+                    writer.write_all(&encoded).await?;
 
-                        log::info!("Sent ServerHello, handshake complete");
+                    log::info!("Sent ServerHello, handshake complete");
 
-                        return Ok(HandshakeResult {
-                            client_hello,
-                            server_hello,
-                            client_id,
-                        });
-                    }
-                    _ => {
-                        anyhow::bail!("expected ClientHello, got other message");
-                    }
-                }
-            }
+                    return Ok(HandshakeResult {
+                        client_hello,
+                        server_hello,
+                        client_id,
+                    });
+                },
+                _ => {
+                    anyhow::bail!("expected ClientHello, got other message");
+                },
+            },
             DecodeResult::Incomplete => {
                 continue;
-            }
+            },
         }
     }
 }
 
-pub fn build_server_hello(client_hello: &ClientHello, session_name: &str, client_id: u64) -> ServerHello {
+pub fn build_server_hello(
+    client_hello: &ClientHello,
+    session_name: &str,
+    client_id: u64,
+) -> ServerHello {
     let negotiated_caps = Capabilities {
         supports_datagrams: client_hello
             .capabilities
@@ -162,16 +164,20 @@ mod tests {
         buffer.extend_from_slice(&chunk[..n]);
 
         match decode_envelope(&mut buffer).unwrap() {
-            DecodeResult::Complete(response) => {
-                match response.msg {
-                    Some(stream_envelope::Msg::ServerHello(hello)) => {
-                        assert_eq!(hello.client_id, 42);
-                        assert_eq!(hello.session_name, "test-session");
-                        assert!(hello.negotiated_capabilities.as_ref().unwrap().supports_datagrams);
-                    }
-                    _ => panic!("expected ServerHello"),
-                }
-            }
+            DecodeResult::Complete(response) => match response.msg {
+                Some(stream_envelope::Msg::ServerHello(hello)) => {
+                    assert_eq!(hello.client_id, 42);
+                    assert_eq!(hello.session_name, "test-session");
+                    assert!(
+                        hello
+                            .negotiated_capabilities
+                            .as_ref()
+                            .unwrap()
+                            .supports_datagrams
+                    );
+                },
+                _ => panic!("expected ServerHello"),
+            },
             DecodeResult::Incomplete => panic!("expected complete response"),
         }
 
@@ -193,8 +199,12 @@ mod tests {
 
         // Client with datagrams disabled
         let mut client_hello = make_client_hello();
-        client_hello.capabilities.as_mut().unwrap().supports_datagrams = false;
-        
+        client_hello
+            .capabilities
+            .as_mut()
+            .unwrap()
+            .supports_datagrams = false;
+
         let envelope = StreamEnvelope {
             msg: Some(stream_envelope::Msg::ClientHello(client_hello)),
         };
@@ -213,11 +223,17 @@ mod tests {
                 match response.msg {
                     Some(stream_envelope::Msg::ServerHello(hello)) => {
                         // Server should honor client's datagram preference
-                        assert!(!hello.negotiated_capabilities.as_ref().unwrap().supports_datagrams);
-                    }
+                        assert!(
+                            !hello
+                                .negotiated_capabilities
+                                .as_ref()
+                                .unwrap()
+                                .supports_datagrams
+                        );
+                    },
                     _ => panic!("expected ServerHello"),
                 }
-            }
+            },
             DecodeResult::Incomplete => panic!("expected complete response"),
         }
 
@@ -234,7 +250,10 @@ mod tests {
 
         let result = run_handshake(server_read, server_write, "test".to_string(), 1).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("connection closed"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("connection closed"));
     }
 
     #[tokio::test]
@@ -252,7 +271,10 @@ mod tests {
 
         let result = run_handshake(server_read, server_write, "test".to_string(), 1).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expected ClientHello"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected ClientHello"));
     }
 
     #[tokio::test]
@@ -275,10 +297,10 @@ mod tests {
         // Send first half
         let mid = encoded.len() / 2;
         client_write.write_all(&encoded[..mid]).await.unwrap();
-        
+
         // Small delay to let server process partial
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        
+
         // Send second half
         client_write.write_all(&encoded[mid..]).await.unwrap();
 
@@ -313,8 +335,14 @@ mod tests {
         };
 
         let hello = build_server_hello(&client_hello, "test", 1);
-        
+
         // Should default to no datagrams
-        assert!(!hello.negotiated_capabilities.as_ref().unwrap().supports_datagrams);
+        assert!(
+            !hello
+                .negotiated_capabilities
+                .as_ref()
+                .unwrap()
+                .supports_datagrams
+        );
     }
 }

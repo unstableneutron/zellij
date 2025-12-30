@@ -182,7 +182,10 @@ fn test_attach_request_roundtrip() {
         last_applied_state_id: 100,
         last_acked_input_seq: 50,
         desired_role: ClientRole::Controller as i32,
-        desired_size: Some(DisplaySize { cols: 120, rows: 40 }),
+        desired_size: Some(DisplaySize {
+            cols: 120,
+            rows: 40,
+        }),
         read_only: false,
         force_snapshot: false,
     };
@@ -279,7 +282,10 @@ fn test_controller_lease_roundtrip() {
 fn test_request_control_roundtrip() {
     let original = RequestControl {
         reason: "User resize".to_string(),
-        desired_size: Some(DisplaySize { cols: 200, rows: 50 }),
+        desired_size: Some(DisplaySize {
+            cols: 200,
+            rows: 50,
+        }),
         force: true,
     };
     let mut buf = Vec::new();
@@ -337,7 +343,10 @@ fn test_release_control_roundtrip() {
 #[test]
 fn test_set_controller_size_roundtrip() {
     let original = SetControllerSize {
-        size: Some(DisplaySize { cols: 132, rows: 43 }),
+        size: Some(DisplaySize {
+            cols: 132,
+            rows: 43,
+        }),
         request_snapshot: true,
     };
     let mut buf = Vec::new();
@@ -478,7 +487,9 @@ fn test_input_event_text_roundtrip() {
     let original = InputEvent {
         input_seq: 42,
         client_time_ms: 1000,
-        payload: Some(input_event::Payload::TextUtf8("Hello, 世界!".as_bytes().to_vec())),
+        payload: Some(input_event::Payload::TextUtf8(
+            "Hello, 世界!".as_bytes().to_vec(),
+        )),
     };
     let mut buf = Vec::new();
     original.encode(&mut buf).unwrap();
@@ -811,27 +822,25 @@ fn test_screen_delta_roundtrip() {
     let original = ScreenDelta {
         base_state_id: 100,
         state_id: 101,
-        styles_added: vec![
-            StyleDef {
-                style_id: 5,
-                style: Some(Style {
-                    fg: Some(Color {
-                        value: Some(color::Value::Ansi256(1)),
-                    }),
-                    bg: None,
-                    bold: true,
-                    dim: false,
-                    italic: false,
-                    reverse: false,
-                    hidden: false,
-                    strike: false,
-                    blink_slow: false,
-                    blink_fast: false,
-                    underline: UnderlineStyle::None as i32,
-                    underline_color: None,
+        styles_added: vec![StyleDef {
+            style_id: 5,
+            style: Some(Style {
+                fg: Some(Color {
+                    value: Some(color::Value::Ansi256(1)),
                 }),
-            },
-        ],
+                bg: None,
+                bold: true,
+                dim: false,
+                italic: false,
+                reverse: false,
+                hidden: false,
+                strike: false,
+                blink_slow: false,
+                blink_fast: false,
+                underline: UnderlineStyle::None as i32,
+                underline_color: None,
+            }),
+        }],
         row_patches: vec![RowPatch {
             row: 0,
             runs: vec![CellRun {
@@ -878,37 +887,33 @@ fn test_screen_snapshot_roundtrip() {
         state_id: 500,
         size: Some(DisplaySize { cols: 80, rows: 24 }),
         style_table_reset: true,
-        styles: vec![
-            StyleDef {
-                style_id: 0,
-                style: Some(Style {
-                    fg: Some(Color {
-                        value: Some(color::Value::DefaultColor(DefaultColor {})),
-                    }),
-                    bg: Some(Color {
-                        value: Some(color::Value::DefaultColor(DefaultColor {})),
-                    }),
-                    bold: false,
-                    dim: false,
-                    italic: false,
-                    reverse: false,
-                    hidden: false,
-                    strike: false,
-                    blink_slow: false,
-                    blink_fast: false,
-                    underline: UnderlineStyle::None as i32,
-                    underline_color: None,
+        styles: vec![StyleDef {
+            style_id: 0,
+            style: Some(Style {
+                fg: Some(Color {
+                    value: Some(color::Value::DefaultColor(DefaultColor {})),
                 }),
-            },
-        ],
-        rows: vec![
-            RowData {
-                row: 0,
-                codepoints: vec![' ' as u32; 80],
-                widths: vec![1; 80],
-                style_ids: vec![0; 80],
-            },
-        ],
+                bg: Some(Color {
+                    value: Some(color::Value::DefaultColor(DefaultColor {})),
+                }),
+                bold: false,
+                dim: false,
+                italic: false,
+                reverse: false,
+                hidden: false,
+                strike: false,
+                blink_slow: false,
+                blink_fast: false,
+                underline: UnderlineStyle::None as i32,
+                underline_color: None,
+            }),
+        }],
+        rows: vec![RowData {
+            row: 0,
+            codepoints: vec![' ' as u32; 80],
+            widths: vec![1; 80],
+            style_ids: vec![0; 80],
+        }],
         cursor: Some(CursorState {
             row: 0,
             col: 0,
@@ -930,7 +935,10 @@ fn test_screen_snapshot_large() {
     let row_count = 50;
     let original = ScreenSnapshot {
         state_id: 1000,
-        size: Some(DisplaySize { cols, rows: row_count }),
+        size: Some(DisplaySize {
+            cols,
+            rows: row_count,
+        }),
         style_table_reset: true,
         styles: (0..10)
             .map(|i| StyleDef {
@@ -1189,7 +1197,10 @@ fn test_stream_envelope_request_control() {
     let original = StreamEnvelope {
         msg: Some(stream_envelope::Msg::RequestControl(RequestControl {
             reason: "resize".to_string(),
-            desired_size: Some(DisplaySize { cols: 120, rows: 40 }),
+            desired_size: Some(DisplaySize {
+                cols: 120,
+                rows: 40,
+            }),
             force: false,
         })),
     };
@@ -1250,7 +1261,10 @@ fn test_stream_envelope_release_control() {
 fn test_stream_envelope_set_controller_size() {
     let original = StreamEnvelope {
         msg: Some(stream_envelope::Msg::SetControllerSize(SetControllerSize {
-            size: Some(DisplaySize { cols: 132, rows: 43 }),
+            size: Some(DisplaySize {
+                cols: 132,
+                rows: 43,
+            }),
             request_snapshot: false,
         })),
     };

@@ -3,6 +3,9 @@ pub mod output;
 pub mod panes;
 pub mod tab;
 
+#[cfg(feature = "remote")]
+pub mod remote_bridge;
+
 mod background_jobs;
 mod global_async_runtime;
 mod logging_pipe;

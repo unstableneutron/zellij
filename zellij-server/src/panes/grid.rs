@@ -598,6 +598,14 @@ impl Grid {
     pub fn cursor_shape(&self) -> CursorShape {
         self.cursor.get_shape()
     }
+
+    pub fn viewport(&self) -> &[Row] {
+        &self.viewport
+    }
+
+    pub fn cursor_is_hidden(&self) -> bool {
+        self.cursor_is_hidden
+    }
     pub fn scrollback_position_and_length(&self) -> (usize, usize) {
         // (position, length)
         (

@@ -6,37 +6,17 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use zellij_remote_bridge::encode_envelope;
-use zellij_remote_core::{Cell, DeltaEngine, Frame, FrameStore, StyleTable};
+use zellij_remote_core::{Cell, FrameStore, InputError, LeaseResult, RemoteSession, RenderUpdate};
 use zellij_remote_protocol::{
-    stream_envelope, Capabilities, ClientHello, ControllerLease, ControllerPolicy,
-    ProtocolVersion, ServerHello, SessionState, StreamEnvelope,
+    input_event, key_event, stream_envelope, Capabilities, ClientHello, DenyControl, DisplaySize,
+    GrantControl, InputEvent, ProtocolVersion, ServerHello, SessionState, StreamEnvelope,
 };
 
 const SCREEN_COLS: usize = 80;
 const SCREEN_ROWS: usize = 24;
+const DEFAULT_RENDER_WINDOW: u32 = 4;
 
 static CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-/// Shared session state that persists across client connections
-struct SharedSession {
-    store: FrameStore,
-    style_table: StyleTable,
-    connection_count: u64,
-}
-
-impl SharedSession {
-    fn new() -> Self {
-        let mut store = FrameStore::new(SCREEN_COLS, SCREEN_ROWS);
-        draw_welcome_screen(&mut store);
-        store.advance_state();
-
-        Self {
-            store,
-            style_table: StyleTable::new(),
-            connection_count: 0,
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -59,18 +39,22 @@ async fn main() -> Result<()> {
 
     let server = wtransport::Endpoint::server(config)?;
 
-    // Shared session state - persists across connections
-    let session = Arc::new(RwLock::new(SharedSession::new()));
+    let session = Arc::new(RwLock::new(RemoteSession::new(SCREEN_COLS, SCREEN_ROWS)));
 
-    // Background task to update screen state
+    {
+        let mut s = session.write().await;
+        draw_welcome_screen(&mut s.frame_store);
+        s.frame_store.advance_state();
+    }
+
     let session_updater = session.clone();
     tokio::spawn(async move {
         let mut counter = 0u32;
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let mut session = session_updater.write().await;
-            update_animation(&mut session.store, counter);
-            session.store.advance_state();
+            update_animation(&mut session.frame_store, counter);
+            session.frame_store.advance_state();
             counter += 1;
         }
     });
@@ -81,10 +65,7 @@ async fn main() -> Result<()> {
         let incoming = server.accept().await;
         let session_request = incoming.await?;
 
-        log::info!(
-            "Incoming connection from {}",
-            session_request.authority()
-        );
+        log::info!("Incoming connection from {}", session_request.authority());
 
         let connection = session_request.accept().await?;
         let session = session.clone();
@@ -99,24 +80,22 @@ async fn main() -> Result<()> {
 
 async fn handle_connection(
     connection: wtransport::Connection,
-    session: Arc<RwLock<SharedSession>>,
+    session: Arc<RwLock<RemoteSession>>,
 ) -> Result<()> {
     let (mut send, mut recv) = connection.accept_bi().await?;
 
     let client_id = CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    // Track connection
     {
         let mut s = session.write().await;
-        s.connection_count += 1;
+        s.add_client(client_id, DEFAULT_RENDER_WINDOW);
         log::info!(
-            "Client {} connected (total connections: {})",
+            "Client {} connected (total clients: {})",
             client_id,
-            s.connection_count
+            s.client_count()
         );
     }
 
-    // === HANDSHAKE ===
     let client_hello = read_client_hello(&mut recv).await?;
     log::info!(
         "Received ClientHello from {} (client_id={})",
@@ -124,128 +103,224 @@ async fn handle_connection(
         client_id
     );
 
-    // Check if client wants to resume
-    let resume_state_id = if !client_hello.resume_token.is_empty() {
-        // Parse resume token as state_id (simple implementation)
-        let bytes: [u8; 8] = client_hello
-            .resume_token
-            .get(..8)
-            .and_then(|s| s.try_into().ok())
-            .unwrap_or([0; 8]);
-        let state_id = u64::from_le_bytes(bytes);
-        log::info!("Client requesting resume from state_id={}", state_id);
-        Some(state_id)
-    } else {
-        None
+    let server_hello = {
+        let mut s = session.write().await;
+        let lease = s.lease_manager.request_control(
+            client_id,
+            Some(DisplaySize { cols: 80, rows: 24 }),
+            false,
+        );
+
+        let lease_info = match lease {
+            LeaseResult::Granted(l) => Some(l),
+            LeaseResult::Denied { .. } => s.lease_manager.get_current_lease(),
+        };
+
+        build_server_hello(&client_hello, client_id, lease_info)
     };
 
-    let server_hello = build_server_hello(&client_hello, client_id);
     let encoded = encode_envelope(&StreamEnvelope {
         msg: Some(stream_envelope::Msg::ServerHello(server_hello)),
     })?;
     send.write_all(&encoded).await?;
     log::info!("Sent ServerHello to client {}", client_id);
 
-    // === SEND INITIAL STATE ===
-    let (current_state_id, snapshot_or_delta) = {
-        let session = session.read().await;
-        let current_state_id = session.store.current_state_id();
-
-        if let Some(resume_id) = resume_state_id {
-            if resume_id < current_state_id {
-                // Client has old state, send delta
-                // Note: In real impl, we'd need to keep history. For demo, just send snapshot.
-                log::info!(
-                    "Client resume_id={} < current={}, sending snapshot",
-                    resume_id,
-                    current_state_id
-                );
-            }
-        }
-
-        // Always send snapshot for now (delta resume requires state history)
-        let snapshot = DeltaEngine::compute_snapshot(
-            session.store.current_frame(),
-            &mut session.style_table.clone(),
-            current_state_id,
-        );
-        (current_state_id, snapshot)
-    };
-
-    let encoded = encode_envelope(&StreamEnvelope {
-        msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot_or_delta)),
-    })?;
-    send.write_all(&encoded).await?;
-    log::info!(
-        "Sent ScreenSnapshot (state_id={}) to client {}",
-        current_state_id,
-        client_id
-    );
-
-    // === STREAM DELTAS ===
-    let mut last_sent_state_id = current_state_id;
-    let mut last_snapshot: Option<Frame> = None;
-
-    loop {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let (current_state_id, maybe_delta) = {
-            let session = session.read().await;
-            let current_id = session.store.current_state_id();
-
-            if current_id > last_sent_state_id {
-                let current_frame = session.store.snapshot();
-
-                let delta = if let Some(ref baseline) = last_snapshot {
-                    DeltaEngine::compute_delta(
-                        &baseline.data,
-                        &current_frame.data,
-                        &mut session.style_table.clone(),
-                        last_sent_state_id,
-                        current_id,
-                    )
-                } else {
-                    // No baseline, compute from empty
-                    DeltaEngine::compute_delta(
-                        &FrameStore::new(SCREEN_COLS, SCREEN_ROWS).snapshot().data,
-                        &current_frame.data,
-                        &mut session.style_table.clone(),
-                        last_sent_state_id,
-                        current_id,
-                    )
-                };
-
-                (current_id, Some((delta, current_frame)))
-            } else {
-                (current_id, None)
-            }
-        };
-
-        if let Some((delta, frame)) = maybe_delta {
-            if !delta.row_patches.is_empty() || delta.cursor.is_some() {
-                let encoded = encode_envelope(&StreamEnvelope {
-                    msg: Some(stream_envelope::Msg::ScreenDeltaStream(delta)),
-                })?;
-
-                if let Err(e) = send.write_all(&encoded).await {
-                    log::warn!("Failed to send delta to client {}: {}", client_id, e);
-                    break;
-                }
-
-                log::debug!(
-                    "Sent ScreenDelta (state_id={}) to client {}",
-                    current_state_id,
-                    client_id
-                );
-            }
-
-            last_sent_state_id = current_state_id;
-            last_snapshot = Some(frame);
+    {
+        let mut s = session.write().await;
+        if let Some(RenderUpdate::Snapshot(snapshot)) = s.get_render_update(client_id) {
+            let encoded = encode_envelope(&StreamEnvelope {
+                msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot)),
+            })?;
+            send.write_all(&encoded).await?;
+            log::info!("Sent initial ScreenSnapshot to client {}", client_id);
         }
     }
 
-    log::info!("Client {} disconnected", client_id);
+    let mut buffer = BytesMut::new();
+
+    loop {
+        tokio::select! {
+            read_result = async {
+                let mut chunk = [0u8; 4096];
+                recv.read(&mut chunk).await.map(|n| (n, chunk))
+            } => {
+                let (n, chunk) = read_result?;
+                let n = n.unwrap_or(0);
+                if n == 0 {
+                    log::info!("Client {} stream closed", client_id);
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+
+                while let Some(envelope) = decode_envelope(&mut buffer)? {
+                    match envelope.msg {
+                        Some(stream_envelope::Msg::InputEvent(input)) => {
+                            let ack = {
+                                let mut s = session.write().await;
+                                match s.process_input(client_id, &input) {
+                                    Ok(ack) => {
+                                        handle_input_effect(&mut s.frame_store, &input);
+                                        s.frame_store.advance_state();
+                                        Some(ack)
+                                    }
+                                    Err(InputError::NotController) => {
+                                        log::warn!("Client {} sent input but is not controller", client_id);
+                                        None
+                                    }
+                                    Err(InputError::Duplicate) => {
+                                        log::debug!("Duplicate input from client {}", client_id);
+                                        None
+                                    }
+                                    Err(e) => {
+                                        log::warn!("Input error from client {}: {:?}", client_id, e);
+                                        None
+                                    }
+                                }
+                            };
+
+                            if let Some(ack) = ack {
+                                let encoded = encode_envelope(&StreamEnvelope {
+                                    msg: Some(stream_envelope::Msg::InputAck(ack)),
+                                })?;
+                                send.write_all(&encoded).await?;
+                            }
+                        }
+                        Some(stream_envelope::Msg::RequestControl(req)) => {
+                            let response = {
+                                let mut s = session.write().await;
+                                let result = s.lease_manager.request_control(
+                                    client_id,
+                                    req.desired_size,
+                                    req.force,
+                                );
+
+                                match result {
+                                    LeaseResult::Granted(lease) => {
+                                        log::info!("Granted control to client {}", client_id);
+                                        stream_envelope::Msg::GrantControl(GrantControl {
+                                            lease: Some(lease),
+                                        })
+                                    }
+                                    LeaseResult::Denied { reason, current_lease } => {
+                                        log::info!("Denied control to client {}: {}", client_id, reason);
+                                        stream_envelope::Msg::DenyControl(DenyControl {
+                                            reason,
+                                            lease: current_lease,
+                                        })
+                                    }
+                                }
+                            };
+
+                            let encoded = encode_envelope(&StreamEnvelope {
+                                msg: Some(response),
+                            })?;
+                            send.write_all(&encoded).await?;
+                        }
+                        _ => {
+                            log::debug!("Ignoring unhandled message from client {}", client_id);
+                        }
+                    }
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                let update = {
+                    let mut s = session.write().await;
+                    s.get_render_update(client_id)
+                };
+
+                match update {
+                    Some(RenderUpdate::Snapshot(snapshot)) => {
+                        let encoded = encode_envelope(&StreamEnvelope {
+                            msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot)),
+                        })?;
+                        if let Err(e) = send.write_all(&encoded).await {
+                            log::warn!("Failed to send snapshot to client {}: {}", client_id, e);
+                            break;
+                        }
+                    }
+                    Some(RenderUpdate::Delta(delta)) => {
+                        if !delta.row_patches.is_empty() || delta.cursor.is_some() {
+                            let encoded = encode_envelope(&StreamEnvelope {
+                                msg: Some(stream_envelope::Msg::ScreenDeltaStream(delta)),
+                            })?;
+                            if let Err(e) = send.write_all(&encoded).await {
+                                log::warn!("Failed to send delta to client {}: {}", client_id, e);
+                                break;
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    {
+        let mut s = session.write().await;
+        s.remove_client(client_id);
+        log::info!(
+            "Client {} disconnected (remaining: {})",
+            client_id,
+            s.client_count()
+        );
+    }
+
     Ok(())
+}
+
+fn handle_input_effect(store: &mut FrameStore, input: &InputEvent) {
+    match &input.payload {
+        Some(input_event::Payload::Key(key)) => {
+            if let Some(key_event::Key::UnicodeScalar(codepoint)) = &key.key {
+                if let Some(ch) = char::from_u32(*codepoint) {
+                    echo_char(store, ch);
+                }
+            }
+        },
+        Some(input_event::Payload::TextUtf8(text)) => {
+            if let Ok(s) = std::str::from_utf8(text) {
+                for ch in s.chars() {
+                    echo_char(store, ch);
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+static ECHO_COL: AtomicU64 = AtomicU64::new(2);
+const ECHO_ROW: usize = 20;
+
+fn echo_char(store: &mut FrameStore, ch: char) {
+    let col = ECHO_COL.fetch_add(1, Ordering::Relaxed) as usize;
+
+    if col >= SCREEN_COLS - 2 {
+        ECHO_COL.store(2, Ordering::Relaxed);
+        store.update_row(ECHO_ROW, |row_data| {
+            for c in 2..SCREEN_COLS - 2 {
+                row_data.set_cell(
+                    c,
+                    Cell {
+                        codepoint: ' ' as u32,
+                        width: 1,
+                        style_id: 0,
+                    },
+                );
+            }
+        });
+        return;
+    }
+
+    store.update_row(ECHO_ROW, |row_data| {
+        row_data.set_cell(
+            col,
+            Cell {
+                codepoint: ch as u32,
+                width: 1,
+                style_id: 0,
+            },
+        );
+    });
 }
 
 async fn read_client_hello(recv: &mut wtransport::RecvStream) -> Result<ClientHello> {
@@ -263,10 +338,10 @@ async fn read_client_hello(recv: &mut wtransport::RecvStream) -> Result<ClientHe
             match envelope.msg {
                 Some(stream_envelope::Msg::ClientHello(hello)) => {
                     return Ok(hello);
-                }
+                },
                 _ => {
                     anyhow::bail!("expected ClientHello, got other message");
-                }
+                },
             }
         }
     }
@@ -287,7 +362,7 @@ fn decode_envelope(buf: &mut BytesMut) -> Result<Option<StreamEnvelope>> {
                 return Ok(None);
             }
             anyhow::bail!("invalid varint in frame header");
-        }
+        },
     };
 
     let varint_len = buf.len() - peek.len();
@@ -303,7 +378,11 @@ fn decode_envelope(buf: &mut BytesMut) -> Result<Option<StreamEnvelope>> {
     Ok(Some(envelope))
 }
 
-fn build_server_hello(client_hello: &ClientHello, client_id: u64) -> ServerHello {
+fn build_server_hello(
+    client_hello: &ClientHello,
+    client_id: u64,
+    lease: Option<zellij_remote_protocol::ControllerLease>,
+) -> ServerHello {
     let negotiated_caps = Capabilities {
         supports_datagrams: client_hello
             .capabilities
@@ -328,18 +407,11 @@ fn build_server_hello(client_hello: &ClientHello, client_id: u64) -> ServerHello
         client_id,
         session_name: "spike-demo".to_string(),
         session_state: SessionState::Running.into(),
-        lease: Some(ControllerLease {
-            lease_id: 1,
-            owner_client_id: client_id,
-            policy: ControllerPolicy::LastWriterWins.into(),
-            current_size: None,
-            remaining_ms: 30000,
-            duration_ms: 30000,
-        }),
-        resume_token: vec![], // Server could send token for client to use on reconnect
+        lease,
+        resume_token: vec![],
         snapshot_interval_ms: 5000,
         max_inflight_inputs: 256,
-        render_window: zellij_remote_protocol::DEFAULT_RENDER_WINDOW,
+        render_window: DEFAULT_RENDER_WINDOW,
     }
 }
 
@@ -353,21 +425,23 @@ fn draw_welcome_screen(store: &mut FrameStore) {
         empty,
         "║                     🦎 Zellij Remote Protocol Demo 🦎                       ║",
         empty,
-        "║  This server maintains PERSISTENT SESSION STATE across connections.        ║",
+        "║  This server uses RemoteSession with proper lease management.              ║",
         empty,
-        "║  • Disconnect and reconnect - you'll see the same counter value           ║",
-        "║  • Multiple clients can connect simultaneously                             ║",
-        "║  • State continues updating even with no clients                          ║",
+        "║  • First client gets controller lease automatically                        ║",
+        "║  • Input events are processed and echoed to screen                         ║",
+        "║  • Watch the counter and type to see characters echoed below               ║",
         empty,
         "║  Watch the counter below - it persists across reconnections:              ║",
         empty,
         "║                                                                              ║",
         empty,
         "║  Protocol features demonstrated:                                            ║",
-        "║    ✓ Session persistence                                                   ║",
-        "║    ✓ Multiple client support                                               ║",
-        "║    ✓ Cumulative delta updates                                              ║",
-        "║    ✓ Graceful disconnect handling                                          ║",
+        "║    ✓ RemoteSession with lease management                                   ║",
+        "║    ✓ InputEvent processing with InputAck                                   ║",
+        "║    ✓ Controller-only input handling                                        ║",
+        "║    ✓ Delta streaming with RenderUpdate                                     ║",
+        empty,
+        "║  Typed input: >                                                            ║",
         empty,
         bottom,
     ];
@@ -399,7 +473,6 @@ fn draw_text(store: &mut FrameStore, row: usize, text: &str) {
 }
 
 fn update_animation(store: &mut FrameStore, counter: u32) {
-    // Update counter display on row 12
     let counter_text = format!(
         "║                    Counter: {:5}  |  State ID: {:5}                      ║",
         counter,
@@ -407,7 +480,6 @@ fn update_animation(store: &mut FrameStore, counter: u32) {
     );
     draw_text(store, 12, &counter_text);
 
-    // Animate a spinner on row 22
     let spinners = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let spinner = spinners[(counter as usize) % spinners.len()];
     let status = format!(

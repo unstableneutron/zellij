@@ -2,17 +2,24 @@ use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
+    event::{Event, KeyCode, KeyEvent as CtKeyEvent, KeyModifiers as CtKeyModifiers},
     execute,
     style::Print,
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use prost::Message;
 use std::io::{stdout, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 use wtransport::{ClientConfig, Endpoint};
 
+use zellij_remote_core::{AckResult, InputSender};
 use zellij_remote_protocol::{
-    stream_envelope, Capabilities, ClientHello, ProtocolVersion, RowData, ScreenDelta,
-    ScreenSnapshot, StreamEnvelope,
+    input_event, key_event, stream_envelope, Capabilities, ClientHello, InputEvent, KeyEvent,
+    KeyModifiers, ProtocolVersion, RequestControl, RowData, ScreenDelta, ScreenSnapshot,
+    SpecialKey, StreamEnvelope,
 };
 
 struct ScreenBuffer {
@@ -51,8 +58,7 @@ impl ScreenBuffer {
                 for (i, &codepoint) in run.codepoints.iter().enumerate() {
                     let col = col_start + i;
                     if col < self.cols {
-                        self.rows[row_idx][col] =
-                            char::from_u32(codepoint).unwrap_or(' ');
+                        self.rows[row_idx][col] = char::from_u32(codepoint).unwrap_or(' ');
                     }
                 }
             }
@@ -107,7 +113,7 @@ fn decode_envelope(buf: &mut BytesMut) -> Result<Option<StreamEnvelope>> {
                 return Ok(None);
             }
             anyhow::bail!("invalid varint in frame header");
-        }
+        },
     };
 
     let varint_len = buf.len() - peek.len();
@@ -123,12 +129,133 @@ fn decode_envelope(buf: &mut BytesMut) -> Result<Option<StreamEnvelope>> {
     Ok(Some(envelope))
 }
 
+fn current_time_ms() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u32)
+        .unwrap_or(0)
+}
+
+fn crossterm_key_to_proto(key: &CtKeyEvent) -> Option<InputEvent> {
+    static INPUT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    let modifiers = KeyModifiers {
+        bits: {
+            let mut bits = 0u32;
+            if key.modifiers.contains(CtKeyModifiers::SHIFT) {
+                bits |= 1;
+            }
+            if key.modifiers.contains(CtKeyModifiers::ALT) {
+                bits |= 2;
+            }
+            if key.modifiers.contains(CtKeyModifiers::CONTROL) {
+                bits |= 4;
+            }
+            if key.modifiers.contains(CtKeyModifiers::SUPER) {
+                bits |= 8;
+            }
+            bits
+        },
+    };
+
+    let key_proto = match key.code {
+        KeyCode::Char(c) => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::UnicodeScalar(c as u32)),
+        }),
+        KeyCode::Enter => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Enter as i32)),
+        }),
+        KeyCode::Esc => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Escape as i32)),
+        }),
+        KeyCode::Backspace => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Backspace as i32)),
+        }),
+        KeyCode::Tab => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Tab as i32)),
+        }),
+        KeyCode::Left => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Left as i32)),
+        }),
+        KeyCode::Right => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Right as i32)),
+        }),
+        KeyCode::Up => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Up as i32)),
+        }),
+        KeyCode::Down => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Down as i32)),
+        }),
+        KeyCode::Home => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Home as i32)),
+        }),
+        KeyCode::End => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::End as i32)),
+        }),
+        KeyCode::PageUp => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::PageUp as i32)),
+        }),
+        KeyCode::PageDown => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::PageDown as i32)),
+        }),
+        KeyCode::Delete => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Delete as i32)),
+        }),
+        KeyCode::Insert => Some(KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Insert as i32)),
+        }),
+        KeyCode::F(n) => {
+            let special = match n {
+                1 => SpecialKey::F1,
+                2 => SpecialKey::F2,
+                3 => SpecialKey::F3,
+                4 => SpecialKey::F4,
+                5 => SpecialKey::F5,
+                6 => SpecialKey::F6,
+                7 => SpecialKey::F7,
+                8 => SpecialKey::F8,
+                9 => SpecialKey::F9,
+                10 => SpecialKey::F10,
+                11 => SpecialKey::F11,
+                12 => SpecialKey::F12,
+                _ => return None,
+            };
+            Some(KeyEvent {
+                modifiers: Some(modifiers),
+                key: Some(key_event::Key::Special(special as i32)),
+            })
+        },
+        _ => None,
+    };
+
+    key_proto.map(|k| InputEvent {
+        input_seq: INPUT_SEQ.fetch_add(1, Ordering::Relaxed),
+        client_time_ms: current_time_ms(),
+        payload: Some(input_event::Payload::Key(k)),
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let server_url = std::env::var("SERVER_URL")
-        .unwrap_or_else(|_| "https://127.0.0.1:4433".to_string());
+    let server_url =
+        std::env::var("SERVER_URL").unwrap_or_else(|_| "https://127.0.0.1:4433".to_string());
     let headless = std::env::var("HEADLESS").is_ok();
 
     let config = ClientConfig::builder()
@@ -145,7 +272,6 @@ async fn main() -> Result<()> {
     eprintln!("Connected! Opening bidirectional stream...");
     let (mut send, mut recv) = connection.open_bi().await?.await?;
 
-    // Send ClientHello
     let client_hello = StreamEnvelope {
         msg: Some(stream_envelope::Msg::ClientHello(ClientHello {
             client_name: "spike-client".to_string(),
@@ -173,15 +299,13 @@ async fn main() -> Result<()> {
     eprintln!("Sent ClientHello, waiting for ServerHello...");
 
     if headless {
-        // Headless mode for testing - just log messages
         run_client_loop_headless(&mut recv).await
     } else {
-        // Interactive mode with terminal rendering
         let mut stdout = stdout();
         execute!(stdout, EnterAlternateScreen, Hide, Clear(ClearType::All))?;
         terminal::enable_raw_mode()?;
 
-        let result = run_client_loop(&mut recv).await;
+        let result = run_client_loop(&mut send, &mut recv).await;
 
         terminal::disable_raw_mode()?;
         execute!(stdout, Show, LeaveAlternateScreen)?;
@@ -210,7 +334,7 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
                         "ServerHello: session={}, client_id={}",
                         hello.session_name, hello.client_id
                     );
-                }
+                },
                 Some(stream_envelope::Msg::ScreenSnapshot(snapshot)) => {
                     println!(
                         "ScreenSnapshot: state_id={}, size={}x{}, rows={}",
@@ -219,7 +343,7 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
                         snapshot.size.as_ref().map(|s| s.rows).unwrap_or(0),
                         snapshot.rows.len()
                     );
-                }
+                },
                 Some(stream_envelope::Msg::ScreenDeltaStream(delta)) => {
                     delta_count += 1;
                     println!(
@@ -229,14 +353,13 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
                         delta.state_id,
                         delta.row_patches.len()
                     );
-                    
-                    // Stop after a few deltas in headless mode
+
                     if delta_count >= 5 {
                         println!("Received 5 deltas, stopping headless test");
                         return Ok(());
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -244,79 +367,156 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
     Ok(())
 }
 
-async fn run_client_loop(recv: &mut wtransport::RecvStream) -> Result<()> {
+async fn run_client_loop(
+    send: &mut wtransport::SendStream,
+    recv: &mut wtransport::RecvStream,
+) -> Result<()> {
     let mut buffer = BytesMut::new();
     let mut screen = ScreenBuffer::new(80, 24);
     let mut snapshot_received = false;
-    let mut delta_count = 0u32;
+    let mut _delta_count = 0u32;
+    let mut is_controller = false;
+    let mut input_sender = InputSender::new(256);
 
-    loop {
-        let mut chunk = [0u8; 4096];
-        let n = recv.read(&mut chunk).await?.unwrap_or(0);
-        if n == 0 {
-            eprintln!("\r\nConnection closed by server");
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..n]);
+    let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(64);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
 
-        while let Some(envelope) = decode_envelope(&mut buffer)? {
-            match envelope.msg {
-                Some(stream_envelope::Msg::ServerHello(hello)) => {
-                    // Show briefly then continue
-                    execute!(
-                        stdout(),
-                        MoveTo(0, 0),
-                        Print(format!(
-                            "ServerHello: session={}, client_id={}",
-                            hello.session_name, hello.client_id
-                        ))
-                    )?;
-                }
-                Some(stream_envelope::Msg::ScreenSnapshot(snapshot)) => {
-                    screen.apply_snapshot(&snapshot);
-                    screen.render()?;
-                    snapshot_received = true;
-
-                    // Show status
-                    execute!(
-                        stdout(),
-                        MoveTo(0, 23),
-                        Print(format!(
-                            "Snapshot received: state_id={}, rows={}        ",
-                            snapshot.state_id,
-                            snapshot.rows.len()
-                        ))
-                    )?;
-                    stdout().flush()?;
-                }
-                Some(stream_envelope::Msg::ScreenDeltaStream(delta)) => {
-                    if !snapshot_received {
-                        continue;
+    std::thread::spawn(move || {
+        while !shutdown_clone.load(Ordering::Relaxed) {
+            if crossterm::event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = crossterm::event::read() {
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(CtKeyModifiers::CONTROL)
+                    {
+                        shutdown_clone.store(true, Ordering::Relaxed);
+                        break;
                     }
 
-                    screen.apply_delta(&delta);
-                    screen.render()?;
-                    delta_count += 1;
+                    if let Some(input_event) = crossterm_key_to_proto(&key) {
+                        let _ = input_tx.blocking_send(input_event);
+                    }
+                }
+            }
+        }
+    });
 
-                    // Show status
-                    execute!(
-                        stdout(),
-                        MoveTo(0, 23),
-                        Print(format!(
-                            "Delta #{}: state_id={}, patches={}        ",
-                            delta_count,
-                            delta.state_id,
-                            delta.row_patches.len()
-                        ))
-                    )?;
-                    stdout().flush()?;
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        tokio::select! {
+            read_result = async {
+                let mut chunk = [0u8; 4096];
+                recv.read(&mut chunk).await.map(|n| (n, chunk))
+            } => {
+                let (n, chunk) = read_result?;
+                let n = n.unwrap_or(0);
+                if n == 0 {
+                    eprintln!("\r\nConnection closed by server");
+                    break;
                 }
-                _ => {
-                    // Ignore other messages for now
+                buffer.extend_from_slice(&chunk[..n]);
+
+                while let Some(envelope) = decode_envelope(&mut buffer)? {
+                    match envelope.msg {
+                        Some(stream_envelope::Msg::ServerHello(hello)) => {
+                            if let Some(lease) = &hello.lease {
+                                if lease.owner_client_id == hello.client_id {
+                                    is_controller = true;
+                                }
+                            }
+
+                            if !is_controller {
+                                let request = StreamEnvelope {
+                                    msg: Some(stream_envelope::Msg::RequestControl(RequestControl {
+                                        reason: "want to type".to_string(),
+                                        desired_size: None,
+                                        force: false,
+                                    })),
+                                };
+                                let encoded = encode_envelope(&request)?;
+                                send.write_all(&encoded).await?;
+                            }
+
+                            execute!(
+                                stdout(),
+                                MoveTo(0, 0),
+                                Print(format!(
+                                    "Session: {}, Client: {}, Controller: {}     ",
+                                    hello.session_name, hello.client_id, is_controller
+                                ))
+                            )?;
+                        }
+                        Some(stream_envelope::Msg::GrantControl(_)) => {
+                            is_controller = true;
+                            execute!(
+                                stdout(),
+                                MoveTo(60, 0),
+                                Print("Controller: true ")
+                            )?;
+                        }
+                        Some(stream_envelope::Msg::DenyControl(deny)) => {
+                            execute!(
+                                stdout(),
+                                MoveTo(0, 23),
+                                Print(format!("Control denied: {}                    ", deny.reason))
+                            )?;
+                        }
+                        Some(stream_envelope::Msg::ScreenSnapshot(snapshot)) => {
+                            screen.apply_snapshot(&snapshot);
+                            screen.render()?;
+                            snapshot_received = true;
+                        }
+                        Some(stream_envelope::Msg::ScreenDeltaStream(delta)) => {
+                            if !snapshot_received {
+                                continue;
+                            }
+
+                            screen.apply_delta(&delta);
+                            screen.render()?;
+                            _delta_count += 1;
+                        }
+                        Some(stream_envelope::Msg::InputAck(ack)) => {
+                            match input_sender.process_ack(&ack) {
+                                AckResult::Ok { rtt_sample } => {
+                                    if let Some(sample) = rtt_sample {
+                                        execute!(
+                                            stdout(),
+                                            MoveTo(0, 23),
+                                            Print(format!(
+                                                "RTT: {}ms, Acked: {}, Inflight: {}        ",
+                                                sample.rtt_ms, ack.acked_seq, input_sender.inflight_count()
+                                            ))
+                                        )?;
+                                    }
+                                }
+                                AckResult::Stale => {}
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+            }
+            Some(input_event) = input_rx.recv() => {
+                if is_controller && input_sender.can_send() {
+                    let seq = input_event.input_seq;
+                    let time_ms = input_event.client_time_ms;
+
+                    let envelope = StreamEnvelope {
+                        msg: Some(stream_envelope::Msg::InputEvent(input_event)),
+                    };
+                    let encoded = encode_envelope(&envelope)?;
+                    send.write_all(&encoded).await?;
+                    input_sender.mark_sent(seq, time_ms);
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
             }
         }
     }
 
+    shutdown.store(true, Ordering::Relaxed);
     Ok(())
 }

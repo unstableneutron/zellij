@@ -143,6 +143,13 @@ impl FrameStore {
         }
     }
 
+    pub fn set_row(&mut self, row_idx: usize, row_data: RowData) {
+        if row_idx < self.current.rows.len() {
+            self.current.rows[row_idx] = Row(Arc::new(row_data));
+            self.dirty_rows.insert(row_idx);
+        }
+    }
+
     pub fn set_cursor(&mut self, cursor: Cursor) {
         self.current.cursor = cursor;
     }

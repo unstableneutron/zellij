@@ -5,8 +5,8 @@ use zellij_remote_bridge::{
     build_server_hello, decode_envelope, encode_envelope, run_handshake, DecodeResult,
 };
 use zellij_remote_protocol::{
-    stream_envelope, Capabilities, ClientHello, ControllerLease, ControllerPolicy,
-    ProtocolVersion, ScreenDelta, ScreenSnapshot, ServerHello, SessionState, StreamEnvelope,
+    stream_envelope, Capabilities, ClientHello, ProtocolVersion, ScreenDelta, ScreenSnapshot,
+    SessionState, StreamEnvelope,
 };
 
 fn make_client_hello() -> ClientHello {
@@ -63,7 +63,7 @@ async fn test_full_handshake_flow_over_duplex() {
             assert_eq!(hello.session_state, SessionState::Running as i32);
             assert!(hello.negotiated_capabilities.unwrap().supports_datagrams);
             assert!(hello.lease.is_some());
-        }
+        },
         _ => panic!("expected ServerHello"),
     }
 
@@ -99,7 +99,7 @@ async fn test_multiple_messages_in_sequence() {
                 env.msg,
                 Some(stream_envelope::Msg::ServerHello(_))
             ));
-        }
+        },
         DecodeResult::Incomplete => panic!("incomplete"),
     }
 
@@ -148,7 +148,7 @@ fn test_screen_snapshot_encode_decode_via_framing() {
                 assert_eq!(s.state_id, 12345);
                 assert_eq!(s.rows.len(), 1);
                 assert_eq!(s.rows[0].codepoints, vec![72, 101, 108, 108, 111]);
-            }
+            },
             _ => panic!("wrong message type"),
         },
         DecodeResult::Incomplete => panic!("incomplete"),
@@ -199,7 +199,7 @@ fn test_screen_delta_encode_decode_via_framing() {
                 assert_eq!(d.state_id, 101);
                 assert_eq!(d.row_patches.len(), 1);
                 assert_eq!(d.row_patches[0].row, 10);
-            }
+            },
             _ => panic!("wrong message type"),
         },
         DecodeResult::Incomplete => panic!("incomplete"),
@@ -244,7 +244,7 @@ fn test_large_snapshot_framing() {
         DecodeResult::Complete(decoded) => match decoded.msg {
             Some(stream_envelope::Msg::ScreenSnapshot(s)) => {
                 assert_eq!(s.rows.len(), 100);
-            }
+            },
             _ => panic!("wrong type"),
         },
         DecodeResult::Incomplete => panic!("incomplete"),
@@ -273,8 +273,14 @@ fn test_build_server_hello_negotiates_capabilities() {
     let hello = build_server_hello(&client_hello_with_datagrams, "session", 1);
 
     let caps = hello.negotiated_capabilities.unwrap();
-    assert!(caps.supports_datagrams, "should honor client datagram support");
+    assert!(
+        caps.supports_datagrams,
+        "should honor client datagram support"
+    );
     assert!(caps.supports_style_dictionary, "server always enables");
     assert!(!caps.supports_images, "server doesn't support images yet");
-    assert!(!caps.supports_clipboard, "server doesn't support clipboard yet");
+    assert!(
+        !caps.supports_clipboard,
+        "server doesn't support clipboard yet"
+    );
 }

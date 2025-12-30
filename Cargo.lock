@@ -5921,6 +5921,8 @@ dependencies = [
  "vte 0.11.0",
  "wasmi",
  "wasmi_wasi",
+ "zellij-remote-core",
+ "zellij-remote-protocol",
  "zellij-utils",
 ]
 
