@@ -1,0 +1,13 @@
+[package]
+name = "zellij-remote-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zellij-remote-protocol = { path = "../zellij-remote-protocol" }
+log = { workspace = true }
+prost = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.4"
