@@ -1,0 +1,452 @@
+syntax = "proto3";
+
+package zellij.remote.v1;
+
+// =============================================================================
+// VERSION & CAPABILITIES
+// =============================================================================
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message Capabilities {
+  bool supports_datagrams = 1;
+  uint32 max_datagram_bytes = 2;
+  bool supports_style_dictionary = 3;
+  bool supports_styled_underlines = 4;
+  bool supports_prediction = 5;
+  bool supports_images = 6;       // sixel/kitty images
+  bool supports_clipboard = 7;    // OSC52
+  bool supports_hyperlinks = 8;
+}
+
+// =============================================================================
+// HANDSHAKE & AUTH
+// =============================================================================
+
+message ClientHello {
+  ProtocolVersion version = 1;
+  Capabilities capabilities = 2;
+  string client_name = 3;         // "ios", "android", "web"
+  bytes bearer_token = 4;         // auth token
+  bytes resume_token = 5;         // optional fast-resume
+}
+
+message ServerHello {
+  ProtocolVersion negotiated_version = 1;
+  Capabilities negotiated_capabilities = 2;
+  uint64 client_id = 3;
+  string session_name = 4;
+  SessionState session_state = 5;
+  ControllerLease lease = 6;
+  bytes resume_token = 7;
+  uint32 snapshot_interval_ms = 8;
+  uint32 max_inflight_inputs = 9;
+  uint32 render_window = 10;      // max unacked state_ids
+}
+
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_RUNNING = 1;
+  SESSION_STATE_CREATED = 2;
+  SESSION_STATE_RESURRECTED = 3;
+}
+
+// =============================================================================
+// ATTACH & RESUME
+// =============================================================================
+
+enum AttachMode {
+  ATTACH_MODE_UNSPECIFIED = 0;
+  ATTACH_MODE_RESUME = 1;         // try delta from last_applied_state_id
+  ATTACH_MODE_FRESH = 2;          // force snapshot
+}
+
+enum ClientRole {
+  CLIENT_ROLE_UNSPECIFIED = 0;
+  CLIENT_ROLE_VIEWER = 1;
+  CLIENT_ROLE_CONTROLLER = 2;
+}
+
+message AttachRequest {
+  AttachMode mode = 1;
+  uint64 last_applied_state_id = 2;
+  uint64 last_acked_input_seq = 3;
+  ClientRole desired_role = 4;
+  DisplaySize desired_size = 5;
+  bool read_only = 6;
+  bool force_snapshot = 7;
+}
+
+message AttachResponse {
+  bool ok = 1;
+  string error_message = 2;
+  ControllerLease lease = 3;
+  uint64 current_state_id = 4;
+  bool will_send_snapshot = 5;
+}
+
+// =============================================================================
+// CONTROLLER LEASE (tmux-like resize control)
+// =============================================================================
+
+enum ControllerPolicy {
+  CONTROLLER_POLICY_UNSPECIFIED = 0;
+  CONTROLLER_POLICY_EXPLICIT_ONLY = 1;
+  CONTROLLER_POLICY_LAST_WRITER_WINS = 2;
+}
+
+message ControllerLease {
+  uint64 lease_id = 1;
+  uint64 owner_client_id = 2;
+  ControllerPolicy policy = 3;
+  DisplaySize current_size = 4;
+  uint32 remaining_ms = 5;
+  uint32 duration_ms = 6;
+}
+
+message RequestControl {
+  string reason = 1;
+  DisplaySize desired_size = 2;
+  bool force = 3;
+}
+
+message GrantControl {
+  ControllerLease lease = 1;
+}
+
+message DenyControl {
+  string reason = 1;
+  ControllerLease lease = 2;
+}
+
+message ReleaseControl {
+  uint64 lease_id = 1;
+}
+
+message SetControllerSize {
+  DisplaySize size = 1;
+  bool request_snapshot = 2;
+}
+
+message KeepAliveLease {
+  uint64 lease_id = 1;
+  uint32 client_time_ms = 2;
+}
+
+message LeaseRevoked {
+  uint64 lease_id = 1;
+  string reason = 2;              // "timeout", "takeover", "disconnect"
+}
+
+// =============================================================================
+// INPUT (reliable stream, exactly-once in-order)
+// =============================================================================
+
+message KeyModifiers {
+  uint32 bits = 1;                // SHIFT=1, ALT=2, CTRL=4, SUPER=8
+}
+
+enum SpecialKey {
+  SPECIAL_KEY_UNSPECIFIED = 0;
+  SPECIAL_KEY_ENTER = 1;
+  SPECIAL_KEY_ESCAPE = 2;
+  SPECIAL_KEY_BACKSPACE = 3;
+  SPECIAL_KEY_TAB = 4;
+  SPECIAL_KEY_LEFT = 10;
+  SPECIAL_KEY_RIGHT = 11;
+  SPECIAL_KEY_UP = 12;
+  SPECIAL_KEY_DOWN = 13;
+  SPECIAL_KEY_HOME = 20;
+  SPECIAL_KEY_END = 21;
+  SPECIAL_KEY_PAGE_UP = 22;
+  SPECIAL_KEY_PAGE_DOWN = 23;
+  SPECIAL_KEY_INSERT = 24;
+  SPECIAL_KEY_DELETE = 25;
+  SPECIAL_KEY_F1 = 40;
+  SPECIAL_KEY_F2 = 41;
+  SPECIAL_KEY_F3 = 42;
+  SPECIAL_KEY_F4 = 43;
+  SPECIAL_KEY_F5 = 44;
+  SPECIAL_KEY_F6 = 45;
+  SPECIAL_KEY_F7 = 46;
+  SPECIAL_KEY_F8 = 47;
+  SPECIAL_KEY_F9 = 48;
+  SPECIAL_KEY_F10 = 49;
+  SPECIAL_KEY_F11 = 50;
+  SPECIAL_KEY_F12 = 51;
+}
+
+message KeyEvent {
+  KeyModifiers modifiers = 1;
+  oneof key {
+    uint32 unicode_scalar = 2;
+    SpecialKey special = 3;
+  }
+}
+
+enum MouseKind {
+  MOUSE_KIND_UNSPECIFIED = 0;
+  MOUSE_KIND_MOVE = 1;
+  MOUSE_KIND_DOWN = 2;
+  MOUSE_KIND_UP = 3;
+  MOUSE_KIND_SCROLL = 4;
+}
+
+enum MouseButton {
+  MOUSE_BUTTON_UNSPECIFIED = 0;
+  MOUSE_BUTTON_LEFT = 1;
+  MOUSE_BUTTON_MIDDLE = 2;
+  MOUSE_BUTTON_RIGHT = 3;
+}
+
+message MouseEvent {
+  MouseKind kind = 1;
+  uint32 col = 2;
+  uint32 row = 3;
+  MouseButton button = 4;
+  int32 scroll_delta = 5;
+  KeyModifiers modifiers = 6;
+}
+
+message InputEvent {
+  uint64 input_seq = 1;
+  uint32 client_time_ms = 2;
+  oneof payload {
+    bytes text_utf8 = 10;         // IME/paste
+    KeyEvent key = 11;
+    bytes raw_bytes = 12;         // escape sequences
+    MouseEvent mouse = 13;
+  }
+}
+
+message InputAck {
+  uint64 acked_seq = 1;           // cumulative: all <= acked_seq delivered
+  uint64 rtt_sample_seq = 2;
+  uint32 echoed_client_time_ms = 3;
+}
+
+// =============================================================================
+// RENDER: SCREEN STATE SYNC
+// =============================================================================
+
+message DisplaySize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message DefaultColor {}
+
+message Rgb {
+  uint32 r = 1;
+  uint32 g = 2;
+  uint32 b = 3;
+}
+
+message Color {
+  oneof value {
+    DefaultColor default_color = 1;
+    uint32 ansi256 = 2;
+    Rgb rgb = 3;
+  }
+}
+
+enum UnderlineStyle {
+  UNDERLINE_STYLE_UNSPECIFIED = 0;
+  UNDERLINE_STYLE_NONE = 1;
+  UNDERLINE_STYLE_SINGLE = 2;
+  UNDERLINE_STYLE_DOUBLE = 3;
+  UNDERLINE_STYLE_DOTTED = 4;
+  UNDERLINE_STYLE_DASHED = 5;
+  UNDERLINE_STYLE_CURLY = 6;
+}
+
+message Style {
+  Color fg = 1;
+  Color bg = 2;
+  bool bold = 3;
+  bool dim = 4;
+  bool italic = 5;
+  bool reverse = 6;
+  bool hidden = 7;
+  bool strike = 8;
+  bool blink_slow = 9;
+  bool blink_fast = 10;
+  UnderlineStyle underline = 11;
+  Color underline_color = 12;
+}
+
+message StyleDef {
+  uint32 style_id = 1;
+  Style style = 2;
+}
+
+enum CursorShape {
+  CURSOR_SHAPE_UNSPECIFIED = 0;
+  CURSOR_SHAPE_BLOCK = 1;
+  CURSOR_SHAPE_BEAM = 2;
+  CURSOR_SHAPE_UNDERLINE = 3;
+}
+
+message CursorState {
+  uint32 row = 1;
+  uint32 col = 2;
+  bool visible = 3;
+  bool blink = 4;
+  CursorShape shape = 5;
+}
+
+message RowData {
+  uint32 row = 1;
+  repeated uint32 codepoints = 2 [packed = true];
+  repeated uint32 widths = 3 [packed = true];
+  repeated uint32 style_ids = 4 [packed = true];
+}
+
+message CellRun {
+  uint32 col_start = 1;
+  repeated uint32 codepoints = 2 [packed = true];
+  repeated uint32 widths = 3 [packed = true];
+  repeated uint32 style_ids = 4 [packed = true];
+}
+
+message RowPatch {
+  uint32 row = 1;
+  repeated CellRun runs = 2;
+}
+
+message ScreenDelta {
+  uint64 base_state_id = 1;       // client must have this applied
+  uint64 state_id = 2;            // resulting state after apply
+  repeated StyleDef styles_added = 3;
+  repeated RowPatch row_patches = 4;
+  CursorState cursor = 5;
+  uint64 delivered_input_watermark = 6;  // for prediction reconciliation
+}
+
+message ScreenSnapshot {
+  uint64 state_id = 1;
+  DisplaySize size = 2;
+  bool style_table_reset = 3;
+  repeated StyleDef styles = 4;
+  repeated RowData rows = 5;
+  CursorState cursor = 6;
+  uint64 delivered_input_watermark = 7;
+}
+
+message StateAck {
+  uint64 last_applied_state_id = 1;
+  uint64 last_received_state_id = 2;
+  uint32 client_time_ms = 3;
+  uint32 estimated_loss_ppm = 4;
+  uint32 srtt_ms = 5;
+}
+
+// =============================================================================
+// RESYNC & ERRORS
+// =============================================================================
+
+message RequestSnapshot {
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_BASE_MISMATCH = 1;
+    REASON_PERIODIC = 2;
+    REASON_DECODE_ERROR = 3;
+    REASON_USER_REQUEST = 4;
+  }
+  Reason reason = 1;
+  uint64 known_state_id = 2;
+}
+
+message ProtocolError {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    CODE_UNAUTHORIZED = 1;
+    CODE_BAD_VERSION = 2;
+    CODE_BAD_MESSAGE = 3;
+    CODE_FLOW_CONTROL = 4;
+    CODE_SESSION_NOT_FOUND = 5;
+    CODE_LEASE_DENIED = 6;
+    CODE_INTERNAL = 7;
+  }
+  Code code = 1;
+  string message = 2;
+  bool fatal = 3;
+}
+
+// =============================================================================
+// KEEPALIVE / RTT
+// =============================================================================
+
+message Ping {
+  uint64 ping_id = 1;
+  uint32 client_time_ms = 2;
+}
+
+message Pong {
+  uint64 ping_id = 1;
+  uint32 echoed_client_time_ms = 2;
+  uint32 server_time_ms = 3;
+}
+
+// =============================================================================
+// UNSUPPORTED FEATURE CONTRACTS
+// =============================================================================
+
+message UnsupportedFeatureNotice {
+  string feature = 1;             // "images", "clipboard", "hyperlinks"
+  string behavior = 2;            // "ignored", "placeholder", "stripped"
+}
+
+// =============================================================================
+// ENVELOPES (stream vs datagram routing)
+// =============================================================================
+
+// Reliable streams: control, input, large renders
+message StreamEnvelope {
+  oneof msg {
+    // Handshake
+    ClientHello client_hello = 1;
+    ServerHello server_hello = 2;
+    AttachRequest attach_request = 3;
+    AttachResponse attach_response = 4;
+    
+    // Lease
+    RequestControl request_control = 10;
+    GrantControl grant_control = 11;
+    DenyControl deny_control = 12;
+    ReleaseControl release_control = 13;
+    SetControllerSize set_controller_size = 14;
+    KeepAliveLease keep_alive_lease = 15;
+    LeaseRevoked lease_revoked = 16;
+    
+    // Resync
+    RequestSnapshot request_snapshot = 20;
+    
+    // Errors & keepalive
+    Ping ping = 30;
+    Pong pong = 31;
+    ProtocolError protocol_error = 32;
+    UnsupportedFeatureNotice unsupported_notice = 33;
+    
+    // Render (large)
+    ScreenSnapshot screen_snapshot = 40;
+    ScreenDelta screen_delta_stream = 41;  // when too big for datagram
+    
+    // Input (reliable stream path - MVP)
+    InputEvent input_event = 50;
+    InputAck input_ack = 51;
+  }
+}
+
+// Datagrams: latency-sensitive, loss-tolerant
+message DatagramEnvelope {
+  oneof msg {
+    ScreenDelta screen_delta = 10;
+    StateAck state_ack = 11;
+    Ping ping = 30;
+    Pong pong = 31;
+  }
+}
