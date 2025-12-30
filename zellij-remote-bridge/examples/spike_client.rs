@@ -18,7 +18,9 @@ use wtransport::{ClientConfig, Endpoint};
 
 const RESUME_TOKEN_FILE: &str = "/tmp/zellij-spike-resume-token";
 
-use zellij_remote_core::{AckResult, InputSender};
+use zellij_remote_core::{
+    AckResult, Confidence, Cursor as CoreCursor, CursorShape, InputSender, PredictionEngine,
+};
 use zellij_remote_protocol::{
     input_event, key_event, stream_envelope, Capabilities, ClientHello, InputEvent, KeyEvent,
     KeyModifiers, ProtocolVersion, RequestControl, RowData, ScreenDelta, ScreenSnapshot,
@@ -28,6 +30,7 @@ use zellij_remote_protocol::{
 struct ScreenBuffer {
     rows: Vec<Vec<char>>,
     cols: usize,
+    cursor: CoreCursor,
 }
 
 impl ScreenBuffer {
@@ -35,6 +38,13 @@ impl ScreenBuffer {
         Self {
             rows: vec![vec![' '; cols]; rows],
             cols,
+            cursor: CoreCursor {
+                col: 0,
+                row: 0,
+                visible: true,
+                blink: true,
+                shape: CursorShape::Block,
+            },
         }
     }
 
@@ -46,6 +56,11 @@ impl ScreenBuffer {
 
         for row_data in &snapshot.rows {
             self.apply_row_data(row_data);
+        }
+
+        if let Some(cursor) = &snapshot.cursor {
+            self.cursor.col = cursor.col;
+            self.cursor.row = cursor.row;
         }
     }
 
@@ -66,6 +81,11 @@ impl ScreenBuffer {
                 }
             }
         }
+
+        if let Some(cursor) = &delta.cursor {
+            self.cursor.col = cursor.col;
+            self.cursor.row = cursor.row;
+        }
     }
 
     fn apply_row_data(&mut self, row_data: &RowData) {
@@ -81,18 +101,55 @@ impl ScreenBuffer {
         }
     }
 
-    fn render(&self) -> Result<()> {
-        let mut stdout = stdout();
-
-        for (row_idx, row) in self.rows.iter().enumerate() {
-            execute!(stdout, MoveTo(0, row_idx as u16))?;
-            let line: String = row.iter().collect();
-            execute!(stdout, Print(&line))?;
+    fn clone_with_overlay(&self, prediction_engine: &PredictionEngine) -> Self {
+        let mut overlay = self.clone();
+        for pred in prediction_engine.pending_predictions() {
+            for &(col, row, ref cell) in &pred.cells {
+                if row < overlay.rows.len() && col < overlay.cols {
+                    if cell.codepoint != 0 {
+                        overlay.rows[row][col] = char::from_u32(cell.codepoint).unwrap_or(' ');
+                    }
+                }
+            }
+            overlay.cursor = pred.cursor;
         }
-
-        stdout.flush()?;
-        Ok(())
+        overlay
     }
+}
+
+impl Clone for ScreenBuffer {
+    fn clone(&self) -> Self {
+        Self {
+            rows: self.rows.clone(),
+            cols: self.cols,
+            cursor: self.cursor,
+        }
+    }
+}
+
+fn render_screen(screen: &ScreenBuffer, pending_count: usize) -> Result<()> {
+    let mut stdout = stdout();
+
+    for (row_idx, row) in screen.rows.iter().enumerate() {
+        execute!(stdout, MoveTo(0, row_idx as u16))?;
+        let line: String = row.iter().collect();
+        execute!(stdout, Print(&line))?;
+    }
+
+    if screen.cursor.visible {
+        execute!(stdout, MoveTo(screen.cursor.col as u16, screen.cursor.row as u16))?;
+    }
+
+    if pending_count > 0 {
+        execute!(
+            stdout,
+            MoveTo(70, 0),
+            Print(format!("[P:{}]", pending_count))
+        )?;
+    }
+
+    stdout.flush()?;
+    Ok(())
 }
 
 fn encode_envelope(envelope: &StreamEnvelope) -> Result<Vec<u8>> {
@@ -409,11 +466,12 @@ async fn run_client_loop(
     recv: &mut wtransport::RecvStream,
 ) -> Result<()> {
     let mut buffer = BytesMut::new();
-    let mut screen = ScreenBuffer::new(80, 24);
+    let mut confirmed_screen = ScreenBuffer::new(80, 24);
     let mut snapshot_received = false;
     let mut _delta_count = 0u32;
     let mut is_controller = false;
     let mut input_sender = InputSender::new(256);
+    let mut prediction_engine = PredictionEngine::new();
 
     let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(64);
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -504,8 +562,9 @@ async fn run_client_loop(
                             )?;
                         }
                         Some(stream_envelope::Msg::ScreenSnapshot(snapshot)) => {
-                            screen.apply_snapshot(&snapshot);
-                            screen.render()?;
+                            prediction_engine.clear();
+                            confirmed_screen.apply_snapshot(&snapshot);
+                            render_screen(&confirmed_screen, 0)?;
                             snapshot_received = true;
                         }
 
@@ -514,8 +573,23 @@ async fn run_client_loop(
                                 continue;
                             }
 
-                            screen.apply_delta(&delta);
-                            screen.render()?;
+                            let server_cursor = CoreCursor {
+                                col: delta.cursor.as_ref().map(|c| c.col).unwrap_or(confirmed_screen.cursor.col),
+                                row: delta.cursor.as_ref().map(|c| c.row).unwrap_or(confirmed_screen.cursor.row),
+                                visible: true,
+                                blink: true,
+                                shape: CursorShape::Block,
+                            };
+
+                            prediction_engine.reconcile(
+                                delta.delivered_input_watermark,
+                                &server_cursor,
+                            );
+
+                            confirmed_screen.apply_delta(&delta);
+
+                            let display = confirmed_screen.clone_with_overlay(&prediction_engine);
+                            render_screen(&display, prediction_engine.pending_count())?;
                             _delta_count += 1;
                         }
                         Some(stream_envelope::Msg::InputAck(ack)) => {
@@ -543,6 +617,31 @@ async fn run_client_loop(
                 if is_controller && input_sender.can_send() {
                     let seq = input_event.input_seq;
                     let time_ms = input_event.client_time_ms;
+
+                    if let Some(input_event::Payload::Key(ref key)) = input_event.payload {
+                        if let Some(key_event::Key::UnicodeScalar(codepoint)) = key.key {
+                            if let Some(ch) = char::from_u32(codepoint) {
+                                if prediction_engine.confidence(ch) != Confidence::None {
+                                    let overlay_cursor = if prediction_engine.pending_count() > 0 {
+                                        prediction_engine.pending_predictions().last()
+                                            .map(|p| p.cursor)
+                                            .unwrap_or(confirmed_screen.cursor)
+                                    } else {
+                                        confirmed_screen.cursor
+                                    };
+                                    if prediction_engine.predict_char(
+                                        ch,
+                                        seq,
+                                        &overlay_cursor,
+                                        confirmed_screen.cols,
+                                    ).is_some() {
+                                        let display = confirmed_screen.clone_with_overlay(&prediction_engine);
+                                        render_screen(&display, prediction_engine.pending_count())?;
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     let envelope = StreamEnvelope {
                         msg: Some(stream_envelope::Msg::InputEvent(input_event)),
