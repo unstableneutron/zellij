@@ -13,6 +13,7 @@ The Zellij Remote Protocol (ZRP) enables Mosh-style remote terminal access over 
 | Phase 0 | Repository & Build Foundations | ✅ Complete |
 | Phase 1 | Core State Management | ✅ Complete |
 | Phase 2 | WebTransport Server | ✅ Complete |
+| Phase 2.5 | End-to-End Render Demo | ✅ Complete |
 | Phase 3 | Backpressure & Flow Control | 🔲 Not Started |
 | Phase 4 | Controller Lease | 🔲 Not Started |
 | Phase 5 | Input Handling | 🔲 Not Started |
@@ -70,11 +71,14 @@ zellij-remote-bridge/     # WebTransport server
 
 ### Local Testing
 ```bash
-# Terminal 1
+# Terminal 1 - Server
 RUST_LOG=info cargo run --example spike_server -p zellij-remote-bridge
 
-# Terminal 2
-RUST_LOG=info cargo run --example spike_client -p zellij-remote-bridge
+# Terminal 2 - Interactive client (renders to terminal)
+cargo run --example spike_client -p zellij-remote-bridge
+
+# Or headless mode for testing
+HEADLESS=1 cargo run --example spike_client -p zellij-remote-bridge
 ```
 
 ### Cross-Machine (Tailscale)
@@ -88,7 +92,24 @@ LISTEN_ADDR=0.0.0.0:4433 ./spike_server
 SERVER_URL="https://100.69.153.168:4433" cargo run --example spike_client -p zellij-remote-bridge
 ```
 
-**Result:** WebTransport/QUIC handshake completes successfully over Tailscale mesh.
+**Result:** Full render pipeline works over Tailscale mesh.
+
+### Network Resilience Testing
+
+| Scenario | Result |
+|----------|--------|
+| Client disconnect mid-stream | ✅ Server continues, logs warning |
+| Reconnection after disconnect | ✅ Client gets current state (higher state_id) |
+| Session persistence | ✅ Background updates continue without clients |
+| Multiple clients | ✅ Each gets unique client_id |
+| Cross-machine reconnect | ✅ Mac → sjc3, state_id 6→19 after 3s gap |
+
+**Test output example:**
+```
+First connection:  client_id=1, state_id=6
+(disconnect, wait 3 seconds)
+Second connection: client_id=2, state_id=19  ← state persisted!
+```
 
 ## Build Requirements
 
@@ -126,20 +147,55 @@ apt-get install protobuf-compiler  # For prost-build
 
 ## Next Steps
 
-### Phase 3: Backpressure
-- Implement render window (max unacked state_ids)
-- Add StateAck message handling
-- Implement snapshot fallback when window exhausted
+### Immediate (High Value)
 
-### Phase 4: Controller Lease
-- Implement lease acquisition/release
-- Add resize control logic
-- Handle lease timeouts and takeover
+#### 1. Input Handling (Phase 5)
+Enable bidirectional communication:
+- Client sends `InputEvent` (keyboard/mouse)
+- Server routes to session, sends `InputAck`
+- Enables interactive terminal use
 
-### Integration with Zellij
-- Hook into existing render pipeline
-- Parse ANSI output into FrameStore
+#### 2. Zellij Integration
+Connect to real Zellij sessions:
+- Hook into existing render pipeline output
+- Parse ANSI sequences into FrameStore
 - Route input events to PTY
+- Attach to existing sessions by name
+
+### Medium Term
+
+#### 3. Resume Tokens
+True Mosh-style resumption:
+- Server sends resume_token in ServerHello
+- Client stores and sends on reconnect
+- Server sends delta from last-acked state (not full snapshot)
+- Requires: state history buffer
+
+#### 4. Controller Lease (Phase 4)
+Multi-client resize coordination:
+- Lease acquisition/release protocol
+- Handle lease timeouts and takeover
+- Smallest-client-wins or explicit control
+
+#### 5. Backpressure (Phase 3)
+Flow control for slow clients:
+- Render window (max unacked state_ids)
+- StateAck message handling
+- Snapshot fallback when window exhausted
+
+### Future
+
+#### 6. Client-side Prediction (Phase 6)
+Local echo for low-latency feel:
+- Predict character echo
+- Reconcile with server state
+- Handle mispredictions gracefully
+
+#### 7. Mobile Client Library (Phase 7)
+UniFFI bindings for iOS/Android:
+- Swift/Kotlin wrappers
+- Native UI rendering
+- Background connection handling
 
 ## Architecture Decisions
 

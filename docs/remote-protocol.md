@@ -116,11 +116,15 @@ RUST_LOG=debug cargo test -p zellij-remote-bridge -- --nocapture
 
 See [docs/plans/2024-12-31-zrp-implementation-status.md](plans/2024-12-31-zrp-implementation-status.md) for current status.
 
-- ✅ Protocol definitions
-- ✅ Core state management
-- ✅ WebTransport server skeleton
+- ✅ Protocol definitions (protobuf)
+- ✅ Core state management (FrameStore, DeltaEngine)
+- ✅ WebTransport server
 - ✅ Handshake flow
-- 🔲 Zellij integration
+- ✅ ScreenSnapshot / ScreenDelta rendering
+- ✅ Session persistence across reconnections
+- ✅ Cross-machine verification (Tailscale)
 - 🔲 Input handling
+- 🔲 Zellij integration
+- 🔲 Resume tokens
 - 🔲 Controller lease
 - 🔲 Client-side prediction
