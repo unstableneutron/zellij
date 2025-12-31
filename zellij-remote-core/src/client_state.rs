@@ -110,6 +110,11 @@ impl ClientRenderState {
     pub fn has_baseline(&self) -> bool {
         self.acked_baseline.is_some()
     }
+
+    pub fn reset_baseline(&mut self) {
+        self.acked_baseline = None;
+        self.acked_baseline_state_id = 0;
+    }
 }
 
 impl Default for ClientRenderState {

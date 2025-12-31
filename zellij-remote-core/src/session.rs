@@ -174,6 +174,12 @@ impl RemoteSession {
         self.clients.contains_key(&client_id)
     }
 
+    pub fn force_client_snapshot(&mut self, client_id: u64) {
+        if let Some(client_state) = self.clients.get_mut(&client_id) {
+            client_state.reset_baseline();
+        }
+    }
+
     pub fn record_state_snapshot(&mut self) {
         let state_id = self.frame_store.current_state_id();
         let frame = self.frame_store.current_frame().clone();

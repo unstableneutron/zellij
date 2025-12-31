@@ -5846,6 +5846,7 @@ version = "0.44.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "clap",
  "crossterm",
  "dashmap",
  "env_logger",
@@ -5853,6 +5854,8 @@ dependencies = [
  "prost",
  "rcgen",
  "rustls",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.61",
  "tokio",

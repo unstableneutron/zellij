@@ -18,11 +18,18 @@ LISTEN_ADDR=0.0.0.0:4433 cargo run --example spike_server -p zellij-remote-bridg
 # Connect to localhost (interactive with keyboard input)
 cargo run --example spike_client -p zellij-remote-bridge
 
-# Connect to remote server
-SERVER_URL="https://100.69.153.168:4433" cargo run --example spike_client -p zellij-remote-bridge
+# Connect to remote server with authentication
+cargo run --example spike_client -p zellij-remote-bridge -- \
+  --server-url https://100.69.153.168:4433 \
+  --token "$ZELLIJ_REMOTE_TOKEN"
 
-# Headless mode for testing
-HEADLESS=1 cargo run --example spike_client -p zellij-remote-bridge
+# Headless mode with metrics output
+cargo run --example spike_client -p zellij-remote-bridge -- \
+  --headless --metrics-out /tmp/metrics.json
+
+# With reconnection support
+cargo run --example spike_client -p zellij-remote-bridge -- \
+  --reconnect=always --token "$ZELLIJ_REMOTE_TOKEN"
 ```
 
 ## Crates
@@ -141,8 +148,9 @@ Client                          Server
 
 ## Testing
 
+### Unit Tests
 ```bash
-# Run all tests
+# Run all unit tests
 cargo test -p zellij-remote-protocol -p zellij-remote-core -p zellij-remote-bridge
 
 # Run with logging
@@ -153,6 +161,31 @@ cargo test -p zellij-remote-core -- lease_tests
 cargo test -p zellij-remote-core -- input_tests
 cargo test -p zellij-remote-core -- backpressure_tests
 ```
+
+### E2E Tests
+See [zellij-remote-tests/README.md](../zellij-remote-tests/README.md) for full documentation.
+
+```bash
+cd zellij-remote-tests
+
+# Run all E2E tests
+make test-all
+
+# Individual tests
+make test-local           # Basic connectivity
+make test-local-auth      # Authentication (valid/invalid/no token)
+make test-local-reconnect # Reconnection and metrics
+```
+
+### Server-Side Test Knobs
+Environment variables for fault injection during testing:
+
+| Variable | Description |
+|----------|-------------|
+| `ZELLIJ_REMOTE_DROP_DELTA_NTH=N` | Drop every Nth delta |
+| `ZELLIJ_REMOTE_DELAY_SEND_MS=N` | Add N ms delay to sends |
+| `ZELLIJ_REMOTE_FORCE_SNAPSHOT_EVERY=N` | Force snapshot every N frames |
+| `ZELLIJ_REMOTE_LOG_FRAME_STATS=1` | Log frame statistics |
 
 ## Implementation Status
 
@@ -193,8 +226,10 @@ export ZELLIJ_REMOTE_TOKEN=$(openssl rand -hex 32)
 # Start Zellij with remote support on all interfaces
 ZELLIJ_REMOTE_ADDR=0.0.0.0:4433 cargo run --features remote
 
-# Connect with token (client must include token in ClientHello.bearer_token)
-# Note: spike_client needs to be updated to support token auth
+# Connect with spike_client using token
+cargo run --example spike_client -p zellij-remote-bridge -- \
+  --server-url https://your-server:4433 \
+  --token "$ZELLIJ_REMOTE_TOKEN"
 ```
 
 ## Security

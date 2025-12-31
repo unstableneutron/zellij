@@ -1,6 +1,6 @@
 # ZRP Implementation Status
 
-**Last Updated:** 2024-12-31 (Post-Implementation Review Complete)
+**Last Updated:** 2024-12-31 (E2E Testing Infrastructure Complete)
 
 ## Overview
 
@@ -20,6 +20,7 @@ The Zellij Remote Protocol (ZRP) enables Mosh-style remote terminal access over 
 | Phase 6 | Client-side Prediction | ✅ Complete |
 | Phase 7 | Zellij Integration | ✅ Complete |
 | Phase 7.5 | Full E2E Wiring | ✅ Complete |
+| Phase 7.6 | E2E Testing Infrastructure | ✅ Complete |
 | Phase 8 | Mobile Client Library | 🔲 Not Started |
 
 ## Crate Structure
@@ -50,12 +51,22 @@ zellij-remote-core/       # State management
 zellij-remote-bridge/     # WebTransport server
 ├── examples/
 │   ├── spike_server.rs   # Test server with full input handling
-│   └── spike_client.rs   # Interactive client with keyboard input
+│   └── spike_client.rs   # Interactive client with CLI, metrics, reconnection
 └── src/
     ├── framing.rs        # Length-prefixed protobuf framing
     ├── handshake.rs      # Generic over AsyncRead/AsyncWrite
     ├── server.rs         # wtransport-based server
     └── config.rs
+
+zellij-remote-tests/      # E2E testing infrastructure
+├── Makefile              # Test runner
+├── scripts/
+│   ├── test-basic.sh     # Basic connectivity test
+│   ├── test-auth.sh      # Authentication tests
+│   ├── test-reconnect.sh # Reconnection and metrics tests
+│   └── netem-wrapper.sh  # Network emulation with cleanup
+├── docker-compose.yml    # Docker-based testing
+└── Dockerfile            # Multi-stage build for containers
 ```
 
 ## Test Coverage
@@ -240,6 +251,37 @@ Following an Oracle review, all HIGH and MEDIUM priority issues were addressed:
 | `ZELLIJ_REMOTE_ADDR` | Address to bind (e.g., `127.0.0.1:4433` or `0.0.0.0:4433`) |
 | `ZELLIJ_REMOTE_TOKEN` | Bearer token for authentication (recommended for non-loopback) |
 | `ZELLIJ_REMOTE_ENABLE` | Enable remote without specifying address (uses default) |
+
+## Phase 7.6: E2E Testing Infrastructure (Completed)
+
+Added comprehensive E2E testing infrastructure:
+
+### spike_client CLI Enhancements
+- Full CLI argument parsing with clap (replaces env vars)
+- `--server-url`, `--token`, `--headless`, `--clear-token`
+- `--script <file>`: Deterministic input replay
+- `--metrics-out <file>`: JSON metrics output
+- `--reconnect <mode>`: `none`, `once`, `always`, `after=Ns`
+
+### Server-Side Test Knobs
+Environment variables for fault injection:
+- `ZELLIJ_REMOTE_DROP_DELTA_NTH=N`: Drop every Nth delta
+- `ZELLIJ_REMOTE_DELAY_SEND_MS=N`: Add latency to sends
+- `ZELLIJ_REMOTE_FORCE_SNAPSHOT_EVERY=N`: Force snapshots
+- `ZELLIJ_REMOTE_LOG_FRAME_STATS=1`: Log frame statistics
+
+### Test Scripts
+All tests use unique session names (`zrp-test-*-$$`) to avoid killing user sessions:
+- `test-basic.sh`: Basic connectivity
+- `test-auth.sh`: Authentication (valid/invalid/no token)
+- `test-reconnect.sh`: Reconnection, resume tokens, metrics validation
+
+### Running E2E Tests
+```bash
+cd zellij-remote-tests
+make build        # Build binaries
+make test-all     # Run all tests
+```
 
 ## Next Steps
 

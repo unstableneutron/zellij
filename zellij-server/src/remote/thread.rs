@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use bytes::BytesMut;
@@ -26,6 +26,69 @@ use crate::screen::ScreenInstruction;
 use crate::ClientId;
 
 static REMOTE_CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+static TEST_KNOBS: OnceLock<TestKnobs> = OnceLock::new();
+
+struct TestKnobs {
+    drop_delta_nth: Option<u32>,
+    delay_send_ms: Option<u64>,
+    force_snapshot_every: Option<u32>,
+    log_frame_stats: bool,
+}
+
+impl TestKnobs {
+    fn from_env() -> Self {
+        Self {
+            drop_delta_nth: std::env::var("ZELLIJ_REMOTE_DROP_DELTA_NTH")
+                .ok()
+                .and_then(|s| s.parse().ok()),
+            delay_send_ms: std::env::var("ZELLIJ_REMOTE_DELAY_SEND_MS")
+                .ok()
+                .and_then(|s| s.parse().ok()),
+            force_snapshot_every: std::env::var("ZELLIJ_REMOTE_FORCE_SNAPSHOT_EVERY")
+                .ok()
+                .and_then(|s| s.parse().ok()),
+            log_frame_stats: std::env::var("ZELLIJ_REMOTE_LOG_FRAME_STATS")
+                .ok()
+                .map(|s| s == "1")
+                .unwrap_or(false),
+        }
+    }
+
+    fn get() -> &'static TestKnobs {
+        TEST_KNOBS.get_or_init(Self::from_env)
+    }
+
+    fn is_any_active(&self) -> bool {
+        self.drop_delta_nth.is_some()
+            || self.delay_send_ms.is_some()
+            || self.force_snapshot_every.is_some()
+            || self.log_frame_stats
+    }
+
+    fn log_active_knobs(&self) {
+        if !self.is_any_active() {
+            return;
+        }
+
+        let mut active = Vec::new();
+        if let Some(n) = self.drop_delta_nth {
+            active.push(format!("DROP_DELTA_NTH={}", n));
+        }
+        if let Some(ms) = self.delay_send_ms {
+            active.push(format!("DELAY_SEND_MS={}", ms));
+        }
+        if let Some(n) = self.force_snapshot_every {
+            active.push(format!("FORCE_SNAPSHOT_EVERY={}", n));
+        }
+        if self.log_frame_stats {
+            active.push("LOG_FRAME_STATS=1".to_string());
+        }
+        log::warn!(
+            "Remote server test knobs active: {}",
+            active.join(", ")
+        );
+    }
+}
 
 const MAX_FRAME_SIZE: usize = 1_048_576; // 1 MB
 const CLIENT_CHANNEL_SIZE: usize = 4;
@@ -65,6 +128,9 @@ struct SharedState {
     session_name: String,
     to_screen: SenderWithContext<ScreenInstruction>,
     active_zellij_client: Option<ClientId>,
+    frame_count: u32,
+    delta_count: u32,
+    dropped_delta_count: u32,
 }
 
 /// Message from connection handlers to the main loop
@@ -127,12 +193,17 @@ async fn run_remote_server(
         );
     }
 
+    TestKnobs::get().log_active_knobs();
+
     let shared_state = Arc::new(RwLock::new(SharedState {
         manager: RemoteManager::new(config.initial_size.cols, config.initial_size.rows),
         current_frame: None,
         session_name: config.session_name.clone(),
         to_screen: config.to_screen,
         active_zellij_client: None,
+        frame_count: 0,
+        delta_count: 0,
+        dropped_delta_count: 0,
     }));
 
     let (conn_event_tx, mut conn_event_rx) = mpsc::channel::<ConnectionEvent>(64);
@@ -227,10 +298,14 @@ async fn handle_instruction(
             frame_store,
             style_table,
         } => {
+            let knobs = TestKnobs::get();
+
             // M2: Clone data needed for sending before releasing lock
-            let updates_to_send: Vec<(u64, StreamEnvelope)> = {
+            #[allow(clippy::type_complexity)]
+            let (updates_to_send, delay_ms): (Vec<(u64, StreamEnvelope, bool, usize)>, Option<u64>) = {
                 let mut state = shared_state.write().await;
                 state.current_frame = Some(frame_store.clone());
+                state.frame_count = state.frame_count.wrapping_add(1);
                 *state.manager.style_table_mut() = style_table;
 
                 let session = state.manager.session_mut();
@@ -243,28 +318,96 @@ async fn handle_instruction(
 
                 let _state_id = session.frame_store.current_state_id();
 
-                clients
+                let force_snapshot = knobs
+                    .force_snapshot_every
+                    .map(|n| n > 0 && state.frame_count % n == 0)
+                    .unwrap_or(false);
+
+                if force_snapshot {
+                    for &remote_id in clients.keys() {
+                        state.manager.session_mut().force_client_snapshot(remote_id);
+                    }
+                }
+
+                let updates: Vec<_> = clients
                     .keys()
                     .filter_map(|&remote_id| {
                         state.manager.session_mut().get_render_update(remote_id).map(|update| {
-                            let msg = match update {
-                                RenderUpdate::Snapshot(snapshot) => StreamEnvelope {
-                                    msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot)),
+                            let (msg, is_delta, frame_size) = match update {
+                                RenderUpdate::Snapshot(snapshot) => {
+                                    let size = snapshot.encoded_len();
+                                    (
+                                        StreamEnvelope {
+                                            msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot)),
+                                        },
+                                        false,
+                                        size,
+                                    )
                                 },
-                                RenderUpdate::Delta(delta) => StreamEnvelope {
-                                    msg: Some(stream_envelope::Msg::ScreenDeltaStream(delta)),
+                                RenderUpdate::Delta(delta) => {
+                                    let size = delta.encoded_len();
+                                    state.delta_count = state.delta_count.wrapping_add(1);
+                                    (
+                                        StreamEnvelope {
+                                            msg: Some(stream_envelope::Msg::ScreenDeltaStream(delta)),
+                                        },
+                                        true,
+                                        size,
+                                    )
                                 },
                             };
-                            (remote_id, msg)
+                            (remote_id, msg, is_delta, frame_size)
                         })
                     })
-                    .collect()
+                    .collect();
+
+                (updates, knobs.delay_send_ms)
             };
             // Lock released here
 
+            if let Some(ms) = delay_ms {
+                tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
+            }
+
             // M1: Send to each client's channel (non-blocking)
             let mut clients_to_remove = Vec::new();
-            for (remote_id, msg) in updates_to_send {
+            let client_count = clients.len();
+
+            for (remote_id, msg, is_delta, frame_size) in updates_to_send {
+                let should_drop = if is_delta {
+                    knobs.drop_delta_nth.map(|n| {
+                        if n > 0 {
+                            let mut state_guard = shared_state.blocking_write();
+                            let should_drop = state_guard.delta_count.is_multiple_of(n);
+                            if should_drop {
+                                state_guard.dropped_delta_count = state_guard.dropped_delta_count.wrapping_add(1);
+                            }
+                            should_drop
+                        } else {
+                            false
+                        }
+                    }).unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if knobs.log_frame_stats {
+                    log::info!(
+                        "[FRAME_STATS] type={} size={} clients={} dropped={} drop_nth={:?} delay_ms={:?}",
+                        if is_delta { "delta" } else { "snapshot" },
+                        frame_size,
+                        client_count,
+                        should_drop,
+                        knobs.drop_delta_nth,
+                        knobs.delay_send_ms,
+                    );
+                }
+
+                if should_drop {
+                    log::debug!("Test knob: dropping delta for client {}", remote_id);
+                    continue;
+                }
+
                 if let Some(client) = clients.get(&remote_id) {
                     if let Err(mpsc::error::TrySendError::Full(_)) = client.sender.try_send(msg) {
                         log::warn!(

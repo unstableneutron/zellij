@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
+use clap::Parser;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{Event, KeyCode, KeyEvent as CtKeyEvent, KeyModifiers as CtKeyModifiers},
@@ -8,11 +9,12 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use prost::Message;
+use serde::Serialize;
 use std::fs;
-use std::io::{stdout, Write};
+use std::io::{stdout, BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use wtransport::{ClientConfig, Endpoint};
 
@@ -26,6 +28,142 @@ use zellij_remote_protocol::{
     KeyModifiers, ProtocolVersion, RequestControl, RowData, ScreenDelta, ScreenSnapshot,
     SpecialKey, StreamEnvelope,
 };
+
+#[derive(Parser, Debug)]
+#[clap(name = "spike_client", about = "Zellij remote spike client")]
+struct Args {
+    #[clap(short = 's', long, default_value = "https://127.0.0.1:4433", env = "SERVER_URL")]
+    server_url: String,
+
+    #[clap(short = 't', long, env = "ZELLIJ_REMOTE_TOKEN")]
+    token: Option<String>,
+
+    #[clap(long, env = "HEADLESS")]
+    headless: bool,
+
+    #[clap(long)]
+    script: Option<String>,
+
+    #[clap(long)]
+    metrics_out: Option<String>,
+
+    #[clap(long, default_value = "none")]
+    reconnect: String,
+
+    #[clap(long, env = "CLEAR_TOKEN")]
+    clear_token: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconnectMode {
+    None,
+    Once,
+    Always,
+    After(Duration),
+}
+
+impl ReconnectMode {
+    fn parse(s: &str) -> Result<Self> {
+        match s {
+            "none" => Ok(ReconnectMode::None),
+            "once" => Ok(ReconnectMode::Once),
+            "always" => Ok(ReconnectMode::Always),
+            s if s.starts_with("after=") => {
+                let delay_str = s.strip_prefix("after=").unwrap();
+                let delay_str = delay_str.trim_end_matches('s');
+                let secs: u64 = delay_str.parse().context("invalid delay in after=Ns")?;
+                Ok(ReconnectMode::After(Duration::from_secs(secs)))
+            },
+            _ => anyhow::bail!("invalid reconnect mode: {}", s),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ScriptCommand {
+    Sleep(u64),
+    Type(String),
+    Key(String),
+    Reconnect,
+    Quit,
+}
+
+fn parse_script(path: &str) -> Result<Vec<ScriptCommand>> {
+    let file = fs::File::open(path).context("failed to open script file")?;
+    let reader = std::io::BufReader::new(file);
+    let mut commands = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        let cmd = parts[0];
+        let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+        match cmd {
+            "sleep" => {
+                let ms: u64 = arg.parse().context("invalid sleep duration")?;
+                commands.push(ScriptCommand::Sleep(ms));
+            },
+            "type" => {
+                commands.push(ScriptCommand::Type(arg.to_string()));
+            },
+            "key" => {
+                commands.push(ScriptCommand::Key(arg.to_string()));
+            },
+            "reconnect" => {
+                commands.push(ScriptCommand::Reconnect);
+            },
+            "quit" => {
+                commands.push(ScriptCommand::Quit);
+            },
+            _ => anyhow::bail!("unknown script command: {}", cmd),
+        }
+    }
+
+    Ok(commands)
+}
+
+#[derive(Debug, Serialize, Default)]
+struct Metrics {
+    session_name: String,
+    client_id: u64,
+    connect_time_ms: u64,
+    total_duration_ms: u64,
+    rtt_samples: Vec<u32>,
+    rtt_min_ms: u32,
+    rtt_avg_ms: f64,
+    rtt_max_ms: u32,
+    deltas_received: u64,
+    snapshots_received: u64,
+    inputs_sent: u64,
+    inputs_acked: u64,
+    prediction_count: u64,
+    reconnect_count: u64,
+    errors: Vec<String>,
+}
+
+impl Metrics {
+    fn finalize(&mut self) {
+        if !self.rtt_samples.is_empty() {
+            self.rtt_min_ms = *self.rtt_samples.iter().min().unwrap_or(&0);
+            self.rtt_max_ms = *self.rtt_samples.iter().max().unwrap_or(&0);
+            self.rtt_avg_ms =
+                self.rtt_samples.iter().map(|&x| x as f64).sum::<f64>() / self.rtt_samples.len() as f64;
+        }
+    }
+
+    fn write_to_file(&mut self, path: &str) -> Result<()> {
+        self.finalize();
+        let json = serde_json::to_string_pretty(self)?;
+        fs::write(path, json)?;
+        Ok(())
+    }
+}
 
 struct ScreenBuffer {
     rows: Vec<Vec<char>>,
@@ -105,10 +243,8 @@ impl ScreenBuffer {
         let mut overlay = self.clone();
         for pred in prediction_engine.pending_predictions() {
             for &(col, row, ref cell) in &pred.cells {
-                if row < overlay.rows.len() && col < overlay.cols {
-                    if cell.codepoint != 0 {
-                        overlay.rows[row][col] = char::from_u32(cell.codepoint).unwrap_or(' ');
-                    }
+                if row < overlay.rows.len() && col < overlay.cols && cell.codepoint != 0 {
+                    overlay.rows[row][col] = char::from_u32(cell.codepoint).unwrap_or(' ');
                 }
             }
             overlay.cursor = pred.cursor;
@@ -310,6 +446,130 @@ fn crossterm_key_to_proto(key: &CtKeyEvent) -> Option<InputEvent> {
     })
 }
 
+fn parse_key_string(key_str: &str) -> Option<InputEvent> {
+    static INPUT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    let parts: Vec<&str> = key_str.split('+').collect();
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let key_name = parts.last()?;
+
+    for &part in parts.iter().take(parts.len().saturating_sub(1)) {
+        match part.to_lowercase().as_str() {
+            "ctrl" => ctrl = true,
+            "alt" => alt = true,
+            "shift" => shift = true,
+            _ => {},
+        }
+    }
+
+    let mut bits = 0u32;
+    if shift {
+        bits |= 1;
+    }
+    if alt {
+        bits |= 2;
+    }
+    if ctrl {
+        bits |= 4;
+    }
+
+    let modifiers = KeyModifiers { bits };
+
+    let key_proto = match key_name.to_lowercase().as_str() {
+        "enter" | "return" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Enter as i32)),
+        },
+        "esc" | "escape" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Escape as i32)),
+        },
+        "backspace" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Backspace as i32)),
+        },
+        "tab" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Tab as i32)),
+        },
+        "left" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Left as i32)),
+        },
+        "right" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Right as i32)),
+        },
+        "up" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Up as i32)),
+        },
+        "down" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Down as i32)),
+        },
+        "home" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Home as i32)),
+        },
+        "end" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::End as i32)),
+        },
+        "pageup" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::PageUp as i32)),
+        },
+        "pagedown" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::PageDown as i32)),
+        },
+        "delete" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Delete as i32)),
+        },
+        "insert" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::Special(SpecialKey::Insert as i32)),
+        },
+        "space" => KeyEvent {
+            modifiers: Some(modifiers),
+            key: Some(key_event::Key::UnicodeScalar(' ' as u32)),
+        },
+        s if s.len() == 1 => {
+            let c = s.chars().next()?;
+            KeyEvent {
+                modifiers: Some(modifiers),
+                key: Some(key_event::Key::UnicodeScalar(c as u32)),
+            }
+        },
+        _ => return None,
+    };
+
+    Some(InputEvent {
+        input_seq: INPUT_SEQ.fetch_add(1, Ordering::Relaxed),
+        client_time_ms: current_time_ms(),
+        payload: Some(input_event::Payload::Key(key_proto)),
+    })
+}
+
+fn char_to_input_event(c: char) -> InputEvent {
+    static INPUT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    let key_proto = KeyEvent {
+        modifiers: Some(KeyModifiers { bits: 0 }),
+        key: Some(key_event::Key::UnicodeScalar(c as u32)),
+    };
+
+    InputEvent {
+        input_seq: INPUT_SEQ.fetch_add(1, Ordering::Relaxed),
+        client_time_ms: current_time_ms(),
+        payload: Some(input_event::Payload::Key(key_proto)),
+    }
+}
+
 fn load_resume_token() -> Vec<u8> {
     fs::read(RESUME_TOKEN_FILE).unwrap_or_default()
 }
@@ -326,19 +586,131 @@ fn clear_resume_token() {
     let _ = fs::remove_file(RESUME_TOKEN_FILE);
 }
 
+#[derive(Debug)]
+enum ClientResult {
+    Disconnected,
+    ScriptReconnect,
+    ScriptQuit,
+    Shutdown,
+}
+
+struct ClientState {
+    args: Args,
+    metrics: Metrics,
+    start_time: Instant,
+    reconnect_mode: ReconnectMode,
+    script_commands: Option<Vec<ScriptCommand>>,
+    script_index: usize,
+}
+
+impl ClientState {
+    fn new(args: Args) -> Result<Self> {
+        let reconnect_mode = ReconnectMode::parse(&args.reconnect)?;
+        let script_commands = args.script.as_ref().map(|p| parse_script(p)).transpose()?;
+
+        Ok(Self {
+            args,
+            metrics: Metrics::default(),
+            start_time: Instant::now(),
+            reconnect_mode,
+            script_commands,
+            script_index: 0,
+        })
+    }
+
+    fn should_reconnect(&self, attempts: u64) -> bool {
+        match self.reconnect_mode {
+            ReconnectMode::None => false,
+            ReconnectMode::Once => attempts == 0,
+            ReconnectMode::Always => true,
+            ReconnectMode::After(_) => true,
+        }
+    }
+
+    fn reconnect_delay(&self) -> Option<Duration> {
+        match self.reconnect_mode {
+            ReconnectMode::After(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let server_url =
-        std::env::var("SERVER_URL").unwrap_or_else(|_| "https://127.0.0.1:4433".to_string());
-    let headless = std::env::var("HEADLESS").is_ok();
-    let clear_token = std::env::var("CLEAR_TOKEN").is_ok();
+    let args = Args::parse();
+    let mut state = ClientState::new(args)?;
 
-    if clear_token {
+    if state.args.clear_token {
         clear_resume_token();
         eprintln!("Cleared stored resume token");
     }
+
+    let mut reconnect_attempts = 0u64;
+
+    loop {
+        let result = run_connection(&mut state).await;
+
+        match result {
+            Ok(ClientResult::ScriptQuit) | Ok(ClientResult::Shutdown) => {
+                break;
+            },
+            Ok(ClientResult::ScriptReconnect) => {
+                state.metrics.reconnect_count += 1;
+                if let Some(delay) = state.reconnect_delay() {
+                    eprintln!("Script reconnect, waiting {:?}...", delay);
+                    tokio::time::sleep(delay).await;
+                }
+                continue;
+            },
+            Ok(ClientResult::Disconnected) => {
+                if state.should_reconnect(reconnect_attempts) {
+                    state.metrics.reconnect_count += 1;
+                    reconnect_attempts += 1;
+                    if let Some(delay) = state.reconnect_delay() {
+                        eprintln!("Disconnected, reconnecting after {:?}...", delay);
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        eprintln!("Disconnected, reconnecting...");
+                    }
+                    continue;
+                } else {
+                    break;
+                }
+            },
+            Err(e) => {
+                state.metrics.errors.push(e.to_string());
+                if state.should_reconnect(reconnect_attempts) {
+                    state.metrics.reconnect_count += 1;
+                    reconnect_attempts += 1;
+                    if let Some(delay) = state.reconnect_delay() {
+                        eprintln!("Error: {}, reconnecting after {:?}...", e, delay);
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        eprintln!("Error: {}, reconnecting...", e);
+                    }
+                    continue;
+                } else {
+                    eprintln!("Error: {}", e);
+                    break;
+                }
+            },
+        }
+    }
+
+    state.metrics.total_duration_ms = state.start_time.elapsed().as_millis() as u64;
+
+    if let Some(ref path) = state.args.metrics_out {
+        state.metrics.write_to_file(path)?;
+        eprintln!("Metrics written to {}", path);
+    }
+
+    Ok(())
+}
+
+async fn run_connection(state: &mut ClientState) -> Result<ClientResult> {
+    let bearer_token = state.args.token.as_ref().map(|s| s.as_bytes().to_vec()).unwrap_or_default();
 
     let resume_token = load_resume_token();
     if !resume_token.is_empty() {
@@ -348,17 +720,23 @@ async fn main() -> Result<()> {
         );
     }
 
+    if !bearer_token.is_empty() {
+        eprintln!("Using bearer token ({} bytes)", bearer_token.len());
+    }
+
     let config = ClientConfig::builder()
         .with_bind_default()
         .with_no_cert_validation()
         .build();
 
-    eprintln!("Connecting to {}...", server_url);
+    let connect_start = Instant::now();
+    eprintln!("Connecting to {}...", state.args.server_url);
     let connection = Endpoint::client(config)?
-        .connect(&server_url)
+        .connect(&state.args.server_url)
         .await
         .context("failed to connect to server")?;
 
+    state.metrics.connect_time_ms = connect_start.elapsed().as_millis() as u64;
     eprintln!("Connected! Opening bidirectional stream...");
     let (mut send, mut recv) = connection.open_bi().await?.await?;
 
@@ -379,7 +757,7 @@ async fn main() -> Result<()> {
                 supports_clipboard: false,
                 supports_hyperlinks: false,
             }),
-            bearer_token: vec![],
+            bearer_token,
             resume_token,
         })),
     };
@@ -388,14 +766,14 @@ async fn main() -> Result<()> {
     send.write_all(&encoded).await?;
     eprintln!("Sent ClientHello, waiting for ServerHello...");
 
-    if headless {
-        run_client_loop_headless(&mut recv).await
+    if state.args.headless {
+        run_client_loop_headless(&mut recv, state).await
     } else {
         let mut stdout = stdout();
         execute!(stdout, EnterAlternateScreen, Hide, Clear(ClearType::All))?;
         terminal::enable_raw_mode()?;
 
-        let result = run_client_loop(&mut send, &mut recv).await;
+        let result = run_client_loop(&mut send, &mut recv, state).await;
 
         terminal::disable_raw_mode()?;
         execute!(stdout, Show, LeaveAlternateScreen)?;
@@ -404,7 +782,10 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<()> {
+async fn run_client_loop_headless(
+    recv: &mut wtransport::RecvStream,
+    state: &mut ClientState,
+) -> Result<ClientResult> {
     let mut buffer = BytesMut::new();
     let mut delta_count = 0u32;
 
@@ -413,7 +794,7 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
         let n = recv.read(&mut chunk).await?.unwrap_or(0);
         if n == 0 {
             println!("Connection closed by server");
-            break;
+            return Ok(ClientResult::Disconnected);
         }
         buffer.extend_from_slice(&chunk[..n]);
 
@@ -426,6 +807,8 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
                         hello.client_id,
                         hello.resume_token.len()
                     );
+                    state.metrics.session_name = hello.session_name;
+                    state.metrics.client_id = hello.client_id;
                     save_resume_token(&hello.resume_token);
                 },
                 Some(stream_envelope::Msg::ScreenSnapshot(snapshot)) => {
@@ -436,10 +819,14 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
                         snapshot.size.as_ref().map(|s| s.rows).unwrap_or(0),
                         snapshot.rows.len()
                     );
+                    state.metrics.snapshots_received += 1;
+                    println!("Received snapshot, stopping headless test");
+                    return Ok(ClientResult::ScriptQuit);
                 },
 
                 Some(stream_envelope::Msg::ScreenDeltaStream(delta)) => {
                     delta_count += 1;
+                    state.metrics.deltas_received += 1;
                     println!(
                         "ScreenDelta #{}: base={}, state_id={}, patches={}",
                         delta_count,
@@ -447,24 +834,18 @@ async fn run_client_loop_headless(recv: &mut wtransport::RecvStream) -> Result<(
                         delta.state_id,
                         delta.row_patches.len()
                     );
-
-                    if delta_count >= 5 {
-                        println!("Received 5 deltas, stopping headless test");
-                        return Ok(());
-                    }
                 },
                 _ => {},
             }
         }
     }
-
-    Ok(())
 }
 
 async fn run_client_loop(
     send: &mut wtransport::SendStream,
     recv: &mut wtransport::RecvStream,
-) -> Result<()> {
+    state: &mut ClientState,
+) -> Result<ClientResult> {
     let mut buffer = BytesMut::new();
     let mut confirmed_screen = ScreenBuffer::new(80, 24);
     let mut snapshot_received = false;
@@ -496,9 +877,35 @@ async fn run_client_loop(
         }
     });
 
+    let (script_tx, mut script_rx) = mpsc::channel::<ScriptCommand>(64);
+    let script_index_update = Arc::new(AtomicU64::new(state.script_index as u64));
+    if let Some(ref commands) = state.script_commands {
+        let commands = commands.clone();
+        let start_index = state.script_index;
+        let shutdown_clone = shutdown.clone();
+        let script_index_update_clone = script_index_update.clone();
+        tokio::spawn(async move {
+            for (i, cmd) in commands.iter().enumerate().skip(start_index) {
+                if shutdown_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let ScriptCommand::Sleep(ms) = cmd {
+                    tokio::time::sleep(Duration::from_millis(*ms)).await;
+                } else if script_tx.send(cmd.clone()).await.is_err() {
+                    break;
+                }
+                if matches!(cmd, ScriptCommand::Quit | ScriptCommand::Reconnect) {
+                    script_index_update_clone.store((i + 1) as u64, Ordering::Relaxed);
+                    break;
+                }
+                script_index_update_clone.store((i + 1) as u64, Ordering::Relaxed);
+            }
+        });
+    }
+
     loop {
         if shutdown.load(Ordering::Relaxed) {
-            break;
+            return Ok(ClientResult::Shutdown);
         }
 
         tokio::select! {
@@ -510,13 +917,15 @@ async fn run_client_loop(
                 let n = n.unwrap_or(0);
                 if n == 0 {
                     eprintln!("\r\nConnection closed by server");
-                    break;
+                    return Ok(ClientResult::Disconnected);
                 }
                 buffer.extend_from_slice(&chunk[..n]);
 
                 while let Some(envelope) = decode_envelope(&mut buffer)? {
                     match envelope.msg {
                         Some(stream_envelope::Msg::ServerHello(hello)) => {
+                            state.metrics.session_name = hello.session_name.clone();
+                            state.metrics.client_id = hello.client_id;
                             save_resume_token(&hello.resume_token);
 
                             if let Some(lease) = &hello.lease {
@@ -566,6 +975,7 @@ async fn run_client_loop(
                             confirmed_screen.apply_snapshot(&snapshot);
                             render_screen(&confirmed_screen, 0)?;
                             snapshot_received = true;
+                            state.metrics.snapshots_received += 1;
                         }
 
                         Some(stream_envelope::Msg::ScreenDeltaStream(delta)) => {
@@ -591,11 +1001,14 @@ async fn run_client_loop(
                             let display = confirmed_screen.clone_with_overlay(&prediction_engine);
                             render_screen(&display, prediction_engine.pending_count())?;
                             _delta_count += 1;
+                            state.metrics.deltas_received += 1;
                         }
                         Some(stream_envelope::Msg::InputAck(ack)) => {
                             match input_sender.process_ack(&ack) {
                                 AckResult::Ok { rtt_sample } => {
+                                    state.metrics.inputs_acked += 1;
                                     if let Some(sample) = rtt_sample {
+                                        state.metrics.rtt_samples.push(sample.rtt_ms);
                                         execute!(
                                             stdout(),
                                             MoveTo(0, 23),
@@ -615,47 +1028,91 @@ async fn run_client_loop(
             }
             Some(input_event) = input_rx.recv() => {
                 if is_controller && input_sender.can_send() {
-                    let seq = input_event.input_seq;
-                    let time_ms = input_event.client_time_ms;
-
-                    if let Some(input_event::Payload::Key(ref key)) = input_event.payload {
-                        if let Some(key_event::Key::UnicodeScalar(codepoint)) = key.key {
-                            if let Some(ch) = char::from_u32(codepoint) {
-                                if prediction_engine.confidence(ch) != Confidence::None {
-                                    let overlay_cursor = if prediction_engine.pending_count() > 0 {
-                                        prediction_engine.pending_predictions().last()
-                                            .map(|p| p.cursor)
-                                            .unwrap_or(confirmed_screen.cursor)
-                                    } else {
-                                        confirmed_screen.cursor
-                                    };
-                                    if prediction_engine.predict_char(
-                                        ch,
-                                        seq,
-                                        &overlay_cursor,
-                                        confirmed_screen.cols,
-                                    ).is_some() {
-                                        let display = confirmed_screen.clone_with_overlay(&prediction_engine);
-                                        render_screen(&display, prediction_engine.pending_count())?;
-                                    }
-                                }
+                    send_input(send, &mut input_sender, &mut prediction_engine, &confirmed_screen, &input_event, state).await?;
+                }
+            }
+            Some(script_cmd) = script_rx.recv() => {
+                match script_cmd {
+                    ScriptCommand::Sleep(_) => {
+                    },
+                    ScriptCommand::Type(text) => {
+                        for c in text.chars() {
+                            let input_event = char_to_input_event(c);
+                            if is_controller && input_sender.can_send() {
+                                send_input(send, &mut input_sender, &mut prediction_engine, &confirmed_screen, &input_event, state).await?;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    },
+                    ScriptCommand::Key(key_str) => {
+                        if let Some(input_event) = parse_key_string(&key_str) {
+                            if is_controller && input_sender.can_send() {
+                                send_input(send, &mut input_sender, &mut prediction_engine, &confirmed_screen, &input_event, state).await?;
                             }
                         }
-                    }
-
-                    let envelope = StreamEnvelope {
-                        msg: Some(stream_envelope::Msg::InputEvent(input_event)),
-                    };
-                    let encoded = encode_envelope(&envelope)?;
-                    send.write_all(&encoded).await?;
-                    input_sender.mark_sent(seq, time_ms);
+                    },
+                    ScriptCommand::Reconnect => {
+                        shutdown.store(true, Ordering::Relaxed);
+                        state.script_index = script_index_update.load(Ordering::Relaxed) as usize;
+                        return Ok(ClientResult::ScriptReconnect);
+                    },
+                    ScriptCommand::Quit => {
+                        shutdown.store(true, Ordering::Relaxed);
+                        state.script_index = script_index_update.load(Ordering::Relaxed) as usize;
+                        return Ok(ClientResult::ScriptQuit);
+                    },
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
             }
         }
     }
+}
 
-    shutdown.store(true, Ordering::Relaxed);
+async fn send_input(
+    send: &mut wtransport::SendStream,
+    input_sender: &mut InputSender,
+    prediction_engine: &mut PredictionEngine,
+    confirmed_screen: &ScreenBuffer,
+    input_event: &InputEvent,
+    state: &mut ClientState,
+) -> Result<()> {
+    let seq = input_event.input_seq;
+    let time_ms = input_event.client_time_ms;
+
+    if let Some(input_event::Payload::Key(ref key)) = input_event.payload {
+        if let Some(key_event::Key::UnicodeScalar(codepoint)) = key.key {
+            if let Some(ch) = char::from_u32(codepoint) {
+                if prediction_engine.confidence(ch) != Confidence::None {
+                    let overlay_cursor = if prediction_engine.pending_count() > 0 {
+                        prediction_engine.pending_predictions().last()
+                            .map(|p| p.cursor)
+                            .unwrap_or(confirmed_screen.cursor)
+                    } else {
+                        confirmed_screen.cursor
+                    };
+                    if prediction_engine.predict_char(
+                        ch,
+                        seq,
+                        &overlay_cursor,
+                        confirmed_screen.cols,
+                    ).is_some() {
+                        state.metrics.prediction_count += 1;
+                        let display = confirmed_screen.clone_with_overlay(prediction_engine);
+                        render_screen(&display, prediction_engine.pending_count())?;
+                    }
+                }
+            }
+        }
+    }
+
+    let envelope = StreamEnvelope {
+        msg: Some(stream_envelope::Msg::InputEvent(input_event.clone())),
+    };
+    let encoded = encode_envelope(&envelope)?;
+    send.write_all(&encoded).await?;
+    input_sender.mark_sent(seq, time_ms);
+    state.metrics.inputs_sent += 1;
+
     Ok(())
 }

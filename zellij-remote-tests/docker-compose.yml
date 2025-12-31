@@ -1,0 +1,105 @@
+# docker-compose.yml for ZRP E2E testing
+#
+# Usage:
+#   # Build images
+#   docker compose -f zellij-remote-tests/docker-compose.yml build
+#
+#   # Run basic test (no network emulation)
+#   docker compose -f zellij-remote-tests/docker-compose.yml up
+#
+#   # Run with high-latency emulation
+#   NETEM_PROFILE=high-rtt docker compose -f zellij-remote-tests/docker-compose.yml --profile netem up
+#
+#   # Cleanup (guaranteed even if tests crash)
+#   docker compose -f zellij-remote-tests/docker-compose.yml down --remove-orphans
+
+services:
+  # Zellij server with remote enabled
+  zellij-server:
+    build:
+      context: ..
+      dockerfile: zellij-remote-tests/Dockerfile
+      target: zellij-server
+    container_name: zrp-server
+    environment:
+      - ZELLIJ_REMOTE_ADDR=0.0.0.0:4433
+      - ZELLIJ_REMOTE_TOKEN=${ZELLIJ_REMOTE_TOKEN:-test-token-12345}
+      - RUST_LOG=${RUST_LOG:-info}
+      - TERM=xterm-256color
+    networks:
+      zrp-test-net:
+        ipv4_address: 172.28.0.10
+    # Keep running for interactive testing
+    tty: true
+    stdin_open: true
+    healthcheck:
+      test: ["CMD", "true"]  # Zellij doesn't have a health endpoint yet
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Test client - connects to server
+  spike-client:
+    build:
+      context: ..
+      dockerfile: zellij-remote-tests/Dockerfile
+      target: spike-client
+    container_name: zrp-client
+    environment:
+      - SERVER_URL=https://172.28.0.10:4433
+      - ZELLIJ_REMOTE_TOKEN=${ZELLIJ_REMOTE_TOKEN:-test-token-12345}
+      - HEADLESS=1
+      - RUST_LOG=${RUST_LOG:-info}
+    networks:
+      zrp-test-net:
+        ipv4_address: 172.28.0.20
+    depends_on:
+      - zellij-server
+    # Run test then exit
+    command: ["spike_client"]
+
+  # Network emulation sidecar (optional - use --profile netem)
+  netem:
+    build:
+      context: ..
+      dockerfile: zellij-remote-tests/Dockerfile
+      target: netem-sidecar
+    container_name: zrp-netem
+    profiles:
+      - netem
+    cap_add:
+      - NET_ADMIN
+    network_mode: "service:spike-client"  # Share network namespace with client
+    environment:
+      - NETEM_PROFILE=${NETEM_PROFILE:-high-rtt}
+    command: ["eth0", "${NETEM_PROFILE:-high-rtt}"]
+    # Cleanup is guaranteed by the wrapper script's trap handlers
+
+  # Second client for multi-client testing
+  spike-client-2:
+    build:
+      context: ..
+      dockerfile: zellij-remote-tests/Dockerfile
+      target: spike-client
+    container_name: zrp-client-2
+    profiles:
+      - multi-client
+    environment:
+      - SERVER_URL=https://172.28.0.10:4433
+      - ZELLIJ_REMOTE_TOKEN=${ZELLIJ_REMOTE_TOKEN:-test-token-12345}
+      - HEADLESS=1
+      - RUST_LOG=${RUST_LOG:-info}
+    networks:
+      zrp-test-net:
+        ipv4_address: 172.28.0.21
+    depends_on:
+      - zellij-server
+    command: ["spike_client"]
+
+networks:
+  zrp-test-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+          gateway: 172.28.0.1
