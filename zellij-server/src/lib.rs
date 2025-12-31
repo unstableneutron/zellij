@@ -6,6 +6,9 @@ pub mod tab;
 #[cfg(feature = "remote")]
 pub mod remote_bridge;
 
+#[cfg(feature = "remote")]
+pub mod remote;
+
 mod background_jobs;
 mod global_async_runtime;
 mod logging_pipe;
@@ -1887,6 +1890,8 @@ fn init_session(
             to_pty_writer: Some(to_pty_writer),
             to_background_jobs: Some(to_background_jobs),
             to_server: Some(to_server),
+            #[cfg(feature = "remote")]
+            to_remote: None,
             should_silently_fail: false,
         },
         capabilities,

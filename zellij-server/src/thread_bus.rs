@@ -8,6 +8,9 @@ use crate::{
 use zellij_utils::errors::prelude::*;
 use zellij_utils::{channels, channels::SenderWithContext, errors::ErrorContext};
 
+#[cfg(feature = "remote")]
+use crate::remote::RemoteInstruction;
+
 /// A container for senders to the different threads in zellij on the server side
 #[derive(Default, Clone)]
 pub struct ThreadSenders {
@@ -17,6 +20,8 @@ pub struct ThreadSenders {
     pub to_server: Option<SenderWithContext<ServerInstruction>>,
     pub to_pty_writer: Option<SenderWithContext<PtyWriteInstruction>>,
     pub to_background_jobs: Option<SenderWithContext<BackgroundJob>>,
+    #[cfg(feature = "remote")]
+    pub to_remote: Option<SenderWithContext<RemoteInstruction>>,
     // this is a convenience for the unit tests
     // it's not advisable to set it to true in production code
     pub should_silently_fail: bool,
@@ -129,6 +134,25 @@ impl ThreadSenders {
         }
     }
 
+    #[cfg(feature = "remote")]
+    pub fn send_to_remote(&self, instruction: RemoteInstruction) -> Result<()> {
+        if self.should_silently_fail {
+            let _ = self
+                .to_remote
+                .as_ref()
+                .map(|sender| sender.send(instruction))
+                .unwrap_or_else(|| Ok(()));
+            Ok(())
+        } else {
+            self.to_remote
+                .as_ref()
+                .context("failed to get remote sender")?
+                .send(instruction)
+                .to_anyhow()
+                .context("failed to send message to remote thread")
+        }
+    }
+
     #[allow(unused)]
     pub fn silently_fail_on_send(mut self) -> Self {
         // this is mostly used for the tests, see struct
@@ -184,6 +208,8 @@ impl<T> Bus<T> {
                 to_server: to_server.cloned(),
                 to_pty_writer: to_pty_writer.cloned(),
                 to_background_jobs: to_background_jobs.cloned(),
+                #[cfg(feature = "remote")]
+                to_remote: None,
                 should_silently_fail: false,
             },
             os_input: os_input.clone(),
@@ -207,6 +233,8 @@ impl<T> Bus<T> {
                 to_server: None,
                 to_pty_writer: None,
                 to_background_jobs: None,
+                #[cfg(feature = "remote")]
+                to_remote: None,
                 should_silently_fail: true,
             },
             os_input: None,

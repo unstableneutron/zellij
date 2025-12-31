@@ -110,6 +110,7 @@ pub struct Frame {
     pub state_id: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct FrameStore {
     current: FrameData,
     state_id: u64,

@@ -631,6 +631,8 @@ impl MockScreen {
                 to_pty_writer: Some(to_pty_writer.clone()),
                 to_background_jobs: Some(to_background_jobs.clone()),
                 to_server: Some(to_server.clone()),
+                #[cfg(feature = "remote")]
+                to_remote: None,
                 should_silently_fail: true,
             },
             capabilities,
