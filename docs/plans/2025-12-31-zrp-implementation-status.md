@@ -386,6 +386,32 @@ cargo run --release --example spike_client -p zellij-remote-bridge -- \
 - DERP relay vs direct affects latency
 - UDP may be degraded on some enterprise networks
 
+### Cross-Machine Test Results (2025-01-01)
+
+Tested Mac (local) → sjc3 (Oracle Cloud aarch64) over Tailscale:
+
+```json
+{
+  "connect_time_ms": 559,
+  "rtt_min_ms": 183,
+  "rtt_avg_ms": 183.3,
+  "deltas_received": 51,
+  "base_mismatches": 0,
+  "snapshots_received": 1,
+  "inputs_sent": 27,
+  "inputs_acked": 27
+}
+```
+
+**Validated:**
+- ✅ Connection over Tailscale (direct, not DERP)
+- ✅ StateAck working (base_mismatches: 0)
+- ✅ Stable RTT (~183ms to Oracle Cloud)
+- ✅ Input routing works over WAN
+- ✅ Delta streaming with no resyncs
+
+**Note:** spike_server sends deltas via stream only; datagram delivery requires full Zellij server.
+
 ## Authentication UX Improvements (2025-01-01)
 
 Enhanced authentication flow for better security and usability:

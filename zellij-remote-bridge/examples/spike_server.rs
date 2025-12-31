@@ -5,13 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use zellij_remote_bridge::encode_envelope;
+use zellij_remote_bridge::{decode_datagram_envelope, encode_envelope};
 use zellij_remote_core::{
     Cell, FrameStore, InputError, LeaseResult, RemoteSession, RenderUpdate, ResumeResult,
 };
 use zellij_remote_protocol::{
-    input_event, key_event, stream_envelope, Capabilities, ClientHello, DenyControl, DisplaySize,
-    GrantControl, InputEvent, ProtocolVersion, ServerHello, SessionState, StreamEnvelope,
+    datagram_envelope, input_event, key_event, stream_envelope, Capabilities, ClientHello,
+    DenyControl, DisplaySize, GrantControl, InputEvent, ProtocolVersion, ServerHello, SessionState,
+    StreamEnvelope,
 };
 
 const SCREEN_COLS: usize = 80;
@@ -181,6 +182,31 @@ async fn handle_connection(
             log::info!("Sent initial ScreenSnapshot to client {}", client_id);
         }
     }
+
+    let session_for_datagrams = session.clone();
+    tokio::spawn(async move {
+        loop {
+            match connection.receive_datagram().await {
+                Ok(datagram) => {
+                    if let Ok(envelope) = decode_datagram_envelope(&datagram) {
+                        if let Some(datagram_envelope::Msg::StateAck(state_ack)) = envelope.msg {
+                            let mut s = session_for_datagrams.write().await;
+                            s.process_state_ack(client_id, &state_ack);
+                            log::debug!(
+                                "Processed StateAck from client {}: last_applied={}",
+                                client_id,
+                                state_ack.last_applied_state_id
+                            );
+                        }
+                    }
+                },
+                Err(e) => {
+                    log::debug!("Datagram receive ended for client {}: {}", client_id, e);
+                    break;
+                },
+            }
+        }
+    });
 
     let mut buffer = BytesMut::new();
 
