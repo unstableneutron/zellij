@@ -1484,10 +1484,13 @@ impl Screen {
     fn send_to_remote(&self, output: &Output, connected_clients: &HashSet<ClientId>) {
         use zellij_remote_core::StyleTable;
 
-        for &client_id in connected_clients {
+        // Send a single frame notification to the remote thread using the first available
+        // local client's frame data. The remote thread will broadcast to all WebTransport clients.
+        // This avoids sending duplicate frames when multiple local clients are connected.
+        if let Some(&client_id) = connected_clients.iter().next() {
             if let Some(chunks) = output.get_client_character_chunks(client_id) {
                 if chunks.is_empty() {
-                    continue;
+                    return;
                 }
 
                 let size = self.size;
