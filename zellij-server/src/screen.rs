@@ -1499,6 +1499,7 @@ impl Screen {
                 let instruction = RemoteInstruction::FrameReady {
                     client_id,
                     frame_store,
+                    style_table,
                 };
 
                 let _ = self.bus.senders.send_to_remote(instruction);

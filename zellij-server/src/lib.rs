@@ -1920,12 +1920,19 @@ fn init_session(
                 "127.0.0.1:4433".parse().unwrap()
             });
 
+        let bearer_token = std::env::var("ZELLIJ_REMOTE_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.into_bytes());
+
         let session_name = envs::get_session_name().unwrap_or_else(|_| "zellij".to_string());
 
         let config = RemoteConfig {
             listen_addr,
             session_name,
             initial_size: Size { cols: 80, rows: 24 },
+            to_screen: to_screen_bounded.clone(),
+            bearer_token,
         };
 
         let _remote_thread = thread::Builder::new()

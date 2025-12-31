@@ -171,5 +171,38 @@ See [docs/plans/2024-12-31-zrp-implementation-status.md](plans/2024-12-31-zrp-im
 - ✅ RTT estimation
 - ✅ Resume tokens
 - ✅ Client-side prediction
-- 🔲 Zellij integration
+- ✅ Zellij integration (Phase 7 + 7.5)
 - 🔲 Mobile client library
+
+## Running with Zellij
+
+### Basic (localhost only)
+```bash
+# Start Zellij with remote support (localhost only, no auth needed)
+ZELLIJ_REMOTE_ADDR=127.0.0.1:4433 cargo run --features remote
+
+# Connect with spike_client
+cargo run --example spike_client -p zellij-remote-bridge
+```
+
+### Network Access (with authentication)
+```bash
+# Generate a secure token
+export ZELLIJ_REMOTE_TOKEN=$(openssl rand -hex 32)
+
+# Start Zellij with remote support on all interfaces
+ZELLIJ_REMOTE_ADDR=0.0.0.0:4433 cargo run --features remote
+
+# Connect with token (client must include token in ClientHello.bearer_token)
+# Note: spike_client needs to be updated to support token auth
+```
+
+## Security
+
+The remote server includes several security features:
+
+- **Bearer Token Authentication**: Set `ZELLIJ_REMOTE_TOKEN` to require clients to authenticate
+- **Bind Address Validation**: Critical warning if binding to non-loopback without authentication
+- **Controller Lease Enforcement**: Only the lease holder can send input; non-controllers receive `LEASE_DENIED` errors
+- **Frame Size Limits**: Maximum 1MB frame size to prevent memory exhaustion attacks
+- **Per-Client Send Queues**: Bounded queues prevent slow clients from blocking others

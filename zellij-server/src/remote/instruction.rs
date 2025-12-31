@@ -1,5 +1,5 @@
 use crate::ClientId;
-use zellij_remote_core::FrameStore;
+use zellij_remote_core::{FrameStore, StyleTable};
 use zellij_utils::pane_size::Size;
 
 /// Instructions sent TO the remote thread
@@ -9,6 +9,7 @@ pub enum RemoteInstruction {
     FrameReady {
         client_id: ClientId,
         frame_store: FrameStore,
+        style_table: StyleTable,
     },
     /// Client resized their viewport
     ClientResize {

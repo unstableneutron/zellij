@@ -1,6 +1,6 @@
 # ZRP Implementation Status
 
-**Last Updated:** 2024-12-31
+**Last Updated:** 2024-12-31 (Post-Implementation Review Complete)
 
 ## Overview
 
@@ -19,6 +19,7 @@ The Zellij Remote Protocol (ZRP) enables Mosh-style remote terminal access over 
 | Phase 5 | Input Handling | ✅ Complete |
 | Phase 6 | Client-side Prediction | ✅ Complete |
 | Phase 7 | Zellij Integration | ✅ Complete |
+| Phase 7.5 | Full E2E Wiring | ✅ Complete |
 | Phase 8 | Mobile Client Library | 🔲 Not Started |
 
 ## Crate Structure
@@ -178,22 +179,69 @@ apt-get install protobuf-compiler  # For prost-build
 - Misprediction detection with automatic correction
 - Non-echoing modes (password prompts) disable prediction
 
+## Phase 7.5: Full E2E Wiring (Completed)
+
+Added the final pieces to connect everything end-to-end:
+
+### WebTransport Server in Remote Thread
+- Remote thread now spawns WebTransport server on `ZELLIJ_REMOTE_ADDR`
+- Handles client connections with handshake (ClientHello/ServerHello)
+- Manages multiple concurrent WebTransport clients
+
+### Input Routing to Zellij
+- Input events from WebTransport clients are translated via `input_translate.rs`
+- Translated `Action::Write` is sent as `ScreenInstruction::WriteCharacter`
+- Uses `to_screen` sender passed via `RemoteConfig`
+
+### StyleTable Consistency
+- `StyleTable` is now included in `RemoteInstruction::FrameReady`
+- Remote thread receives fresh style mappings with each frame
+- Enables proper delta computation with consistent style IDs
+
+### Running with Real Zellij
+
+```bash
+# Terminal 1 - Start Zellij with remote enabled (localhost)
+ZELLIJ_REMOTE_ADDR=127.0.0.1:4433 cargo run --features remote
+
+# Terminal 2 - Connect with spike_client
+cargo run --example spike_client -p zellij-remote-bridge
+```
+
+## Post-Implementation Review Fixes (2024-12-31)
+
+Following an Oracle review, all HIGH and MEDIUM priority issues were addressed:
+
+### Security Fixes (HIGH Priority)
+
+| Issue | Fix |
+|-------|-----|
+| **No authentication** | Added bearer token auth via `ZELLIJ_REMOTE_TOKEN` env var |
+| **Bind address ignored** | Changed to `with_bind_address()` to respect full IP:port |
+| **Lease not enforced** | Added lease check before processing input; non-controllers get `LEASE_DENIED` |
+| **Unbounded frame buffering** | Added `MAX_FRAME_SIZE = 1MB`; oversized frames rejected |
+| **Hardcoded client_id=1** | Track active Zellij client; route input correctly |
+
+### Architecture Fixes (MEDIUM Priority)
+
+| Issue | Fix |
+|-------|-----|
+| **Head-of-line blocking** | Per-client send tasks with bounded `mpsc` channels |
+| **Lock contention** | Clone data before releasing lock; no I/O while holding locks |
+| **Blocking recv per-iteration** | Single dedicated blocking thread forwarding to async channel |
+| **Errors swallowed** | Log all errors; track failed sends; disconnect after 3 failures |
+| **Cleanup gaps** | Added `ClientGuard` with `Drop` for automatic cleanup |
+| **Architecture duplication** | Removed duplicate `RemoteSession`; all access via `RemoteManager` |
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ZELLIJ_REMOTE_ADDR` | Address to bind (e.g., `127.0.0.1:4433` or `0.0.0.0:4433`) |
+| `ZELLIJ_REMOTE_TOKEN` | Bearer token for authentication (recommended for non-loopback) |
+| `ZELLIJ_REMOTE_ENABLE` | Enable remote without specifying address (uses default) |
+
 ## Next Steps
-
-### Phase 7: Zellij Integration (Planned)
-
-See [2024-12-31-zrp-zellij-integration.md](./2024-12-31-zrp-zellij-integration.md) for detailed plan.
-
-Key integration points:
-- **Thread Bus**: Add feature-gated `to_remote` sender for remote instructions
-- **Screen Render Hook**: Capture Grid data after tab render, before ANSI serialization
-- **Input Routing**: Translate ZRP InputEvent → Zellij Action → existing route_action path
-- **Remote Thread**: Spawn WebTransport server as additional thread during session init
-
-Design principles:
-- All changes behind `#[cfg(feature = "remote")]`
-- Minimal intrusion (~70 lines in core files)
-- Remote acts as additional transport, not replacement
 
 ### Phase 8: Mobile Client Library (Future)
 
