@@ -1225,6 +1225,14 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     );
                     remove_client!(client_id, os_input, session_state);
                 }
+
+                #[cfg(feature = "remote")]
+                {
+                    if let Some(session_data) = session_data.write().unwrap().as_ref() {
+                        let _ = session_data.senders.send_to_remote(RemoteInstruction::Shutdown);
+                    }
+                }
+
                 break;
             },
             ServerInstruction::DisconnectAllClientsExcept(client_id) => {

@@ -5009,6 +5009,21 @@ pub(crate) fn screen_thread_main(
                 screen.resize_to_screen(new_size)?;
                 screen.log_and_report_session_state()?; // update tabs so that the ui indication will be send to the plugins
                 screen.render(None)?;
+
+                #[cfg(feature = "remote")]
+                {
+                    use crate::remote::RemoteInstruction;
+                    if let Some(&client_id) = screen.connected_clients.borrow().keys().next() {
+                        let size = zellij_utils::pane_size::Size {
+                            rows: new_size.rows,
+                            cols: new_size.cols,
+                        };
+                        let _ = screen.bus.senders.send_to_remote(RemoteInstruction::ClientResize {
+                            client_id,
+                            size,
+                        });
+                    }
+                }
             },
             ScreenInstruction::TerminalPixelDimensions(pixel_dimensions) => {
                 screen.update_pixel_dimensions(pixel_dimensions);

@@ -169,6 +169,10 @@ enum ConnectionEvent {
         remote_id: u64,
         ack: zellij_remote_protocol::StateAck,
     },
+    SetControllerSize {
+        remote_id: u64,
+        request: zellij_remote_protocol::SetControllerSize,
+    },
 }
 
 /// Main entry point for the remote thread
@@ -537,9 +541,15 @@ async fn handle_instruction(
             log::trace!("Frame ready: clients={}", clients.len());
         }
         RemoteInstruction::ClientResize { client_id, size } => {
-            let mut state = shared_state.write().await;
-            state.manager.resize(size.cols, size.rows);
-            log::debug!("Client {} resized: {}x{}", client_id, size.cols, size.rows);
+            // Don't resize frame_store here - let FrameReady detect dimension changes
+            // and perform full copy. Resizing here before FrameReady arrives would
+            // cause dimension_changed to be false, breaking full-frame copy.
+            log::debug!(
+                "Client {} resize notification: {}x{} (will be applied on next FrameReady)",
+                client_id,
+                size.cols,
+                size.rows
+            );
         }
         RemoteInstruction::ClientConnected { client_id, size } => {
             let mut state = shared_state.write().await;
@@ -721,6 +731,16 @@ async fn handle_connection(
                             );
                             conn_event_tx
                                 .send(ConnectionEvent::RequestSnapshot { remote_id, request })
+                                .await?;
+                        }
+                        Some(stream_envelope::Msg::SetControllerSize(request)) => {
+                            log::info!(
+                                "Client {} set controller size: {:?}",
+                                remote_id,
+                                request.size
+                            );
+                            conn_event_tx
+                                .send(ConnectionEvent::SetControllerSize { remote_id, request })
                                 .await?;
                         }
 
@@ -1013,6 +1033,49 @@ async fn handle_connection_event(
                 remote_id,
                 ack.last_applied_state_id
             );
+        }
+        ConnectionEvent::SetControllerSize { remote_id, request } => {
+            let state = shared_state.read().await;
+
+            let session = state.manager.session();
+            let has_lease = session.lease_manager.is_controller(remote_id);
+
+            if !has_lease {
+                log::warn!(
+                    "Client {} tried to set size but is not the controller",
+                    remote_id
+                );
+                return Ok(());
+            }
+
+            if let Some(size) = request.size {
+                // Clamp dimensions to prevent unbounded allocation DoS
+                const MAX_COLS: u32 = 500;
+                const MAX_ROWS: u32 = 500;
+                let cols = size.cols.min(MAX_COLS).max(1);
+                let rows = size.rows.min(MAX_ROWS).max(1);
+
+                if size.cols > MAX_COLS || size.rows > MAX_ROWS {
+                    log::warn!(
+                        "Controller {} requested oversized dimensions {}x{}, clamped to {}x{}",
+                        remote_id,
+                        size.cols,
+                        size.rows,
+                        cols,
+                        rows
+                    );
+                }
+
+                // Don't resize frame_store here - this is a viewport hint only.
+                // The actual terminal size is controlled by the Zellij client.
+                // FrameReady will detect dimension changes and do full copy.
+                log::info!(
+                    "Controller {} set viewport hint to {}x{} (actual resize handled by FrameReady)",
+                    remote_id,
+                    cols,
+                    rows
+                );
+            }
         }
     }
     Ok(())

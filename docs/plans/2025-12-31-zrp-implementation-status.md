@@ -339,6 +339,22 @@ Fixed base_mismatch issue causing excessive snapshot resyncs:
 | deltas_via_datagram | 2 | 11 |
 | snapshots_received | 3 | 1 |
 
+### Resize Handling Wiring (2025-01-01)
+
+Wired up previously unwired RemoteInstruction variants:
+
+**Issues Fixed:**
+1. `RemoteInstruction::ClientResize` - now sent from screen.rs on TerminalResize
+2. `SetControllerSize` from remote clients - now handled (was ignored)
+3. `RemoteInstruction::Shutdown` - now sent on KillSession
+
+**Design Decisions:**
+- ClientResize/SetControllerSize don't resize frame_store directly - they're notifications
+- FrameReady handler detects dimension changes and does full copy
+- This prevents race conditions where resize happens before content arrives
+- SetControllerSize dimensions clamped to 500x500 max to prevent DoS
+- Resize is a viewport hint; doesn't update lease current_size
+
 ## Next Steps
 
 ### Phase 8: Mobile Client Library (Future)
