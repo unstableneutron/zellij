@@ -25,10 +25,10 @@ use zellij_remote_core::{
 };
 use zellij_remote_bridge::{decode_datagram_envelope, encode_datagram_envelope};
 use zellij_remote_protocol::{
-    datagram_envelope, input_event, key_event, request_snapshot, stream_envelope, Capabilities,
-    ClientHello, DatagramEnvelope, InputEvent, KeyEvent, KeyModifiers, ProtocolVersion,
-    RequestControl, RequestSnapshot, RowData, ScreenDelta, ScreenSnapshot, SpecialKey, StateAck,
-    StreamEnvelope,
+    datagram_envelope, input_event, key_event, protocol_error, request_snapshot, stream_envelope,
+    Capabilities, ClientHello, DatagramEnvelope, InputEvent, KeyEvent, KeyModifiers,
+    ProtocolVersion, RequestControl, RequestSnapshot, RowData, ScreenDelta, ScreenSnapshot,
+    SpecialKey, StateAck, StreamEnvelope,
 };
 
 #[derive(Parser, Debug)]
@@ -39,6 +39,9 @@ struct Args {
 
     #[clap(short = 't', long, env = "ZELLIJ_REMOTE_TOKEN")]
     token: Option<String>,
+
+    #[clap(long, help = "Read token from file (must have 0600 permissions on Unix)")]
+    token_file: Option<String>,
 
     #[clap(long, env = "HEADLESS")]
     headless: bool,
@@ -128,6 +131,39 @@ fn parse_script(path: &str) -> Result<Vec<ScriptCommand>> {
     }
 
     Ok(commands)
+}
+
+fn resolve_token(args: &Args) -> Result<Option<String>> {
+    if let Some(ref token) = args.token {
+        return Ok(Some(token.clone()));
+    }
+
+    if let Some(ref token_file) = args.token_file {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::metadata(token_file)
+                .with_context(|| format!("failed to read token file: {}", token_file))?;
+            let mode = metadata.mode() & 0o777;
+            if mode != 0o600 {
+                anyhow::bail!(
+                    "Token file {} has insecure permissions {:o}. Expected 0600.",
+                    token_file,
+                    mode
+                );
+            }
+        }
+        let token = fs::read_to_string(token_file)
+            .with_context(|| format!("failed to read token file: {}", token_file))?
+            .trim()
+            .to_string();
+        if token.is_empty() {
+            anyhow::bail!("Token file {} is empty", token_file);
+        }
+        return Ok(Some(token));
+    }
+
+    Ok(None)
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -800,7 +836,8 @@ async fn run_connection(
     endpoint: &Endpoint<wtransport::endpoint::endpoint_side::Client>,
     state: &mut ClientState,
 ) -> Result<ClientResult> {
-    let bearer_token = state.args.token.as_ref().map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+    let token = resolve_token(&state.args)?;
+    let bearer_token = token.as_ref().map(|s| s.as_bytes().to_vec()).unwrap_or_default();
 
     let resume_token = load_resume_token().unwrap_or_default();
     if !resume_token.is_empty() {
@@ -937,6 +974,16 @@ async fn run_client_loop_headless(
                         delta.state_id,
                         delta.row_patches.len()
                     );
+                },
+                Some(stream_envelope::Msg::ProtocolError(error)) => {
+                    if error.code == protocol_error::Code::Unauthorized as i32 {
+                        eprintln!("Authentication failed. Check your --token, --token-file, or ZELLIJ_REMOTE_TOKEN.");
+                    } else {
+                        eprintln!("Server error: {} (code={})", error.message, error.code);
+                    }
+                    if error.fatal {
+                        return Ok(ClientResult::Disconnected);
+                    }
                 },
                 _ => {},
             }
@@ -1077,6 +1124,16 @@ async fn run_client_loop(
                                 MoveTo(0, 23),
                                 Print(format!("Control denied: {}                    ", deny.reason))
                             )?;
+                        }
+                        Some(stream_envelope::Msg::ProtocolError(error)) => {
+                            if error.code == protocol_error::Code::Unauthorized as i32 {
+                                eprintln!("\r\nAuthentication failed. Check your --token, --token-file, or ZELLIJ_REMOTE_TOKEN.");
+                            } else {
+                                eprintln!("\r\nServer error: {} (code={})", error.message, error.code);
+                            }
+                            if error.fatal {
+                                return Ok(ClientResult::Disconnected);
+                            }
                         }
                         Some(stream_envelope::Msg::ScreenSnapshot(snapshot)) => {
                             prediction_engine.clear();

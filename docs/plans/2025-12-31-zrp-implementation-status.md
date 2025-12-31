@@ -386,6 +386,22 @@ cargo run --release --example spike_client -p zellij-remote-bridge -- \
 - DERP relay vs direct affects latency
 - UDP may be degraded on some enterprise networks
 
+## Authentication UX Improvements (2025-01-01)
+
+Enhanced authentication flow for better security and usability:
+
+**Server-side:**
+- Sends structured `ProtocolError` before closing on auth failure
+- Constant-time token comparison using `subtle` crate (prevents timing attacks)
+- Empty `ZELLIJ_REMOTE_TOKEN` treated as no auth (with warning)
+- Stream properly flushed before connection close
+
+**Client-side (spike_client):**
+- New `--token-file` flag with Unix permission check (requires 0600)
+- Token precedence: `--token` > `--token-file` > `ZELLIJ_REMOTE_TOKEN`
+- Clear error message on auth failure: "Check your --token, --token-file, or ZELLIJ_REMOTE_TOKEN"
+- Handles `ProtocolError` messages from server
+
 ## Next Steps
 
 ### Phase 8: Mobile Client Library (Future)

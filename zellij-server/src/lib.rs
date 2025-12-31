@@ -1930,8 +1930,15 @@ fn init_session(
 
         let bearer_token = std::env::var("ZELLIJ_REMOTE_TOKEN")
             .ok()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.into_bytes());
+            .map(|s| {
+                if s.is_empty() {
+                    log::error!("ZELLIJ_REMOTE_TOKEN cannot be empty, treating as no authentication");
+                    None
+                } else {
+                    Some(s.into_bytes())
+                }
+            })
+            .flatten();
 
         let session_name = envs::get_session_name().unwrap_or_else(|_| "zellij".to_string());
 

@@ -72,7 +72,7 @@ wasmi = { version = "0.51.1", features = ["std"] }
 
 [features]
 web_server_capability = ["zellij-utils/web_server_capability"]
-remote = ["zellij-remote-core", "zellij-remote-protocol", "zellij-remote-bridge", "wtransport", "rcgen"]
+remote = ["zellij-remote-core", "zellij-remote-protocol", "zellij-remote-bridge", "wtransport", "rcgen", "subtle"]
 
 [dependencies.zellij-remote-bridge]
 path = "../zellij-remote-bridge"
@@ -85,4 +85,8 @@ optional = true
 
 [dependencies.rcgen]
 version = "0.13"
+optional = true
+
+[dependencies.subtle]
+version = "2.5"
 optional = true

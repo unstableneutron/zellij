@@ -5928,6 +5928,7 @@ dependencies = [
  "signal-hook",
  "sixel-image",
  "sixel-tokenizer",
+ "subtle",
  "sysinfo",
  "tempfile",
  "tokio",

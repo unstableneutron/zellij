@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, RwLock};
 use wtransport::{Endpoint, Identity, ServerConfig};
 use zellij_remote_bridge::{decode_datagram_envelope, encode_datagram_envelope, encode_envelope};
 use zellij_remote_core::{FrameStore, LeaseResult, RenderUpdate};
+use subtle::ConstantTimeEq;
 use zellij_remote_protocol::{
     datagram_envelope, protocol_error, stream_envelope, Capabilities, ClientHello,
     ControllerLease, DatagramEnvelope, DenyControl, DisplaySize, GrantControl, ProtocolError,
@@ -634,12 +635,24 @@ async fn handle_connection(
     );
 
     if let Some(ref expected) = expected_token {
-        if client_hello.bearer_token != *expected {
+        let auth_valid = client_hello.bearer_token.len() == expected.len()
+            && bool::from(client_hello.bearer_token.ct_eq(expected));
+        if !auth_valid {
             log::warn!(
                 "Authentication failed for remote client {} ({}): invalid bearer token",
                 remote_id,
                 client_hello.client_name
             );
+            let error = ProtocolError {
+                code: protocol_error::Code::Unauthorized as i32,
+                message: "Invalid bearer token".to_string(),
+                fatal: true,
+            };
+            let encoded = encode_envelope(&StreamEnvelope {
+                msg: Some(stream_envelope::Msg::ProtocolError(error)),
+            })?;
+            send.write_all(&encoded).await?;
+            send.finish().await.ok();
             anyhow::bail!("authentication failed: invalid bearer token");
         }
         log::debug!("Remote client {} authenticated successfully", remote_id);
