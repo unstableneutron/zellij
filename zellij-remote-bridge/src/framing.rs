@@ -1,7 +1,7 @@
 use anyhow::Result;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use prost::Message;
-use zellij_remote_protocol::StreamEnvelope;
+use zellij_remote_protocol::{DatagramEnvelope, StreamEnvelope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeResult<T> {
@@ -15,6 +15,19 @@ pub fn encode_envelope(envelope: &StreamEnvelope) -> Result<Vec<u8>> {
     prost::encoding::encode_varint(len as u64, &mut buf);
     envelope.encode(&mut buf)?;
     Ok(buf.to_vec())
+}
+
+/// Encode a DatagramEnvelope to Bytes (no length prefix for datagrams)
+/// Returns Bytes for compatibility with wtransport send_datagram
+pub fn encode_datagram_envelope(envelope: &DatagramEnvelope) -> Bytes {
+    let mut buf = Vec::with_capacity(envelope.encoded_len());
+    envelope.encode(&mut buf).expect("Vec write cannot fail");
+    Bytes::from(buf)
+}
+
+/// Decode a DatagramEnvelope from bytes (no length prefix)
+pub fn decode_datagram_envelope(bytes: &[u8]) -> Result<DatagramEnvelope, prost::DecodeError> {
+    DatagramEnvelope::decode(bytes)
 }
 
 pub fn decode_envelope(buf: &mut BytesMut) -> Result<DecodeResult<StreamEnvelope>> {

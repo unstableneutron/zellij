@@ -8,12 +8,12 @@ use bytes::BytesMut;
 use prost::Message;
 use tokio::sync::{mpsc, RwLock};
 use wtransport::{Endpoint, Identity, ServerConfig};
-use zellij_remote_bridge::encode_envelope;
+use zellij_remote_bridge::{encode_datagram_envelope, encode_envelope};
 use zellij_remote_core::{FrameStore, LeaseResult, RenderUpdate};
 use zellij_remote_protocol::{
-    protocol_error, stream_envelope, Capabilities, ClientHello, ControllerLease, DenyControl,
-    DisplaySize, GrantControl, ProtocolError, ProtocolVersion, ServerHello, SessionState,
-    StreamEnvelope,
+    datagram_envelope, protocol_error, stream_envelope, Capabilities, ClientHello,
+    ControllerLease, DatagramEnvelope, DenyControl, DisplaySize, GrantControl, ProtocolError,
+    ProtocolVersion, ServerHello, SessionState, StreamEnvelope,
 };
 use zellij_utils::channels::{Receiver, SenderWithContext};
 use zellij_utils::errors::ErrorContext;
@@ -118,6 +118,12 @@ struct ClientConnection {
     sender: mpsc::Sender<StreamEnvelope>,
     #[allow(dead_code)]
     remote_id: u64,
+    /// Handle to the connection for sending datagrams
+    connection: wtransport::Connection,
+    /// Maximum datagram size negotiated (None if datagrams unsupported)
+    max_datagram_size: Option<usize>,
+    /// Whether datagrams are negotiated (transport AND client advertised AND server accepted)
+    datagrams_negotiated: bool,
 }
 
 /// Shared state between the main loop and connection handlers
@@ -138,6 +144,8 @@ enum ConnectionEvent {
     ClientConnected {
         remote_id: u64,
         send: wtransport::SendStream,
+        connection: wtransport::Connection,
+        client_supports_datagrams: bool,
     },
     ClientDisconnected {
         remote_id: u64,
@@ -149,6 +157,10 @@ enum ConnectionEvent {
     RequestControl {
         remote_id: u64,
         request: zellij_remote_protocol::RequestControl,
+    },
+    RequestSnapshot {
+        remote_id: u64,
+        request: zellij_remote_protocol::RequestSnapshot,
     },
 }
 
@@ -301,8 +313,7 @@ async fn handle_instruction(
             let knobs = TestKnobs::get();
 
             // M2: Clone data needed for sending before releasing lock
-            #[allow(clippy::type_complexity)]
-            let (updates_to_send, delay_ms): (Vec<(u64, StreamEnvelope, bool, usize)>, Option<u64>) = {
+            let (updates_to_send, delay_ms): (Vec<(u64, RenderUpdate, usize)>, Option<u64>) = {
                 let mut state = shared_state.write().await;
                 state.current_frame = Some(frame_store.clone());
                 state.frame_count = state.frame_count.wrapping_add(1);
@@ -333,30 +344,14 @@ async fn handle_instruction(
                     .keys()
                     .filter_map(|&remote_id| {
                         state.manager.session_mut().get_render_update(remote_id).map(|update| {
-                            let (msg, is_delta, frame_size) = match update {
-                                RenderUpdate::Snapshot(snapshot) => {
-                                    let size = snapshot.encoded_len();
-                                    (
-                                        StreamEnvelope {
-                                            msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot)),
-                                        },
-                                        false,
-                                        size,
-                                    )
-                                },
+                            let frame_size = match &update {
+                                RenderUpdate::Snapshot(snapshot) => snapshot.encoded_len(),
                                 RenderUpdate::Delta(delta) => {
-                                    let size = delta.encoded_len();
                                     state.delta_count = state.delta_count.wrapping_add(1);
-                                    (
-                                        StreamEnvelope {
-                                            msg: Some(stream_envelope::Msg::ScreenDeltaStream(delta)),
-                                        },
-                                        true,
-                                        size,
-                                    )
+                                    delta.encoded_len()
                                 },
                             };
-                            (remote_id, msg, is_delta, frame_size)
+                            (remote_id, update, frame_size)
                         })
                     })
                     .collect();
@@ -370,10 +365,16 @@ async fn handle_instruction(
             }
 
             // M1: Send to each client's channel (non-blocking)
+            // Try datagrams first for deltas, fall back to stream
+            const CONSERVATIVE_DATAGRAM_LIMIT: usize = 1200;
+
             let mut clients_to_remove = Vec::new();
+            let mut clients_need_snapshot = Vec::new();
             let client_count = clients.len();
 
-            for (remote_id, msg, is_delta, frame_size) in updates_to_send {
+            for (remote_id, update, frame_size) in updates_to_send {
+                let is_delta = matches!(&update, RenderUpdate::Delta(_));
+
                 let should_drop = if is_delta {
                     knobs.drop_delta_nth.map(|n| {
                         if n > 0 {
@@ -409,15 +410,70 @@ async fn handle_instruction(
                 }
 
                 if let Some(client) = clients.get(&remote_id) {
-                    if let Err(mpsc::error::TrySendError::Full(_)) = client.sender.try_send(msg) {
-                        log::warn!(
-                            "Client {} channel full, dropping frame (backpressure)",
-                            remote_id
-                        );
-                    } else if client.sender.is_closed() {
-                        clients_to_remove.push(remote_id);
+                    let mut sent_via_datagram = false;
+
+                    if let RenderUpdate::Delta(ref delta) = update {
+                        if client.datagrams_negotiated {
+                            let datagram_envelope = DatagramEnvelope {
+                                msg: Some(datagram_envelope::Msg::ScreenDelta(delta.clone())),
+                            };
+                            let encoded = encode_datagram_envelope(&datagram_envelope);
+                            let max_size = client
+                                .max_datagram_size
+                                .unwrap_or(0)
+                                .min(CONSERVATIVE_DATAGRAM_LIMIT);
+
+                            if encoded.len() <= max_size {
+                                match client.connection.send_datagram(&encoded) {
+                                    Ok(()) => {
+                                        log::trace!(
+                                            "Sent delta via datagram ({} bytes) to client {}",
+                                            encoded.len(),
+                                            remote_id
+                                        );
+                                        sent_via_datagram = true;
+                                    },
+                                    Err(e) => {
+                                        log::debug!(
+                                            "Datagram send failed for client {}, using stream: {}",
+                                            remote_id,
+                                            e
+                                        );
+                                    },
+                                }
+                            }
+                        }
+                    }
+
+                    if !sent_via_datagram {
+                        let msg = match update {
+                            RenderUpdate::Snapshot(snapshot) => StreamEnvelope {
+                                msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot)),
+                            },
+                            RenderUpdate::Delta(delta) => StreamEnvelope {
+                                msg: Some(stream_envelope::Msg::ScreenDeltaStream(delta)),
+                            },
+                        };
+                        match client.sender.try_send(msg) {
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                log::warn!(
+                                    "Client {} channel full, forcing snapshot resync",
+                                    remote_id
+                                );
+                                clients_need_snapshot.push(remote_id);
+                            },
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                clients_to_remove.push(remote_id);
+                            },
+                            Ok(()) => {},
+                        }
                     }
                 }
+            }
+
+            for remote_id in &clients_need_snapshot {
+                let mut state = shared_state.write().await;
+                state.manager.session_mut().force_client_snapshot(*remote_id);
             }
 
             for remote_id in clients_to_remove {
@@ -567,9 +623,17 @@ async fn handle_connection(
 
     guard.disarm();
 
+    let client_supports_datagrams = client_hello
+        .capabilities
+        .as_ref()
+        .map(|c| c.supports_datagrams)
+        .unwrap_or(false);
+
     conn_event_tx.send(ConnectionEvent::ClientConnected {
         remote_id,
         send,
+        connection: connection.clone(),
+        client_supports_datagrams,
     }).await?;
 
     let mut buffer = BytesMut::new();
@@ -596,6 +660,16 @@ async fn handle_connection(
                                 remote_id,
                                 request: req,
                             }).await?;
+                        }
+                        Some(stream_envelope::Msg::RequestSnapshot(request)) => {
+                            log::info!(
+                                "Client {} requested snapshot: reason={:?}",
+                                remote_id,
+                                request.reason
+                            );
+                            conn_event_tx
+                                .send(ConnectionEvent::RequestSnapshot { remote_id, request })
+                                .await?;
                         }
 
                         _ => {
@@ -641,11 +715,38 @@ async fn handle_connection_event(
     event: ConnectionEvent,
 ) -> Result<()> {
     match event {
-        ConnectionEvent::ClientConnected { remote_id, send } => {
-            // M1: Create bounded channel and spawn sender task
+        ConnectionEvent::ClientConnected { remote_id, send, connection, client_supports_datagrams } => {
+            let max_datagram_size = connection.max_datagram_size();
+            let transport_supports = max_datagram_size.is_some();
+            let datagrams_negotiated = transport_supports && client_supports_datagrams;
+
+            if datagrams_negotiated {
+                log::info!(
+                    "Client {} datagrams negotiated, max_size={}",
+                    remote_id,
+                    max_datagram_size.unwrap()
+                );
+            } else {
+                log::info!(
+                    "Client {} datagrams not negotiated (transport={}, client_advertised={})",
+                    remote_id,
+                    transport_supports,
+                    client_supports_datagrams
+                );
+            }
+
             let (tx, rx) = mpsc::channel::<StreamEnvelope>(CLIENT_CHANNEL_SIZE);
             spawn_client_sender_task(remote_id, send, rx);
-            clients.insert(remote_id, ClientConnection { sender: tx, remote_id });
+            clients.insert(
+                remote_id,
+                ClientConnection {
+                    sender: tx,
+                    remote_id,
+                    connection,
+                    max_datagram_size,
+                    datagrams_negotiated,
+                },
+            );
             log::info!("Remote client {} added to active clients (total: {})", remote_id, clients.len());
         }
         ConnectionEvent::ClientDisconnected { remote_id } => {
@@ -781,6 +882,17 @@ async fn handle_connection_event(
                     log::warn!("Client {} channel full, dropping control response", remote_id);
                 }
             }
+        }
+        ConnectionEvent::RequestSnapshot { remote_id, request } => {
+            log::info!(
+                "Processing snapshot request from {}: reason={}, known_state={}",
+                remote_id,
+                request.reason,
+                request.known_state_id
+            );
+
+            let mut state = shared_state.write().await;
+            state.manager.session_mut().force_client_snapshot(remote_id);
         }
     }
     Ok(())

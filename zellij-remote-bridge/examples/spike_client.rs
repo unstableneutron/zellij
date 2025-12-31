@@ -23,10 +23,11 @@ const RESUME_TOKEN_FILE: &str = "/tmp/zellij-spike-resume-token";
 use zellij_remote_core::{
     AckResult, Confidence, Cursor as CoreCursor, CursorShape, InputSender, PredictionEngine,
 };
+use zellij_remote_bridge::decode_datagram_envelope;
 use zellij_remote_protocol::{
-    input_event, key_event, stream_envelope, Capabilities, ClientHello, InputEvent, KeyEvent,
-    KeyModifiers, ProtocolVersion, RequestControl, RowData, ScreenDelta, ScreenSnapshot,
-    SpecialKey, StreamEnvelope,
+    datagram_envelope, input_event, key_event, request_snapshot, stream_envelope, Capabilities,
+    ClientHello, InputEvent, KeyEvent, KeyModifiers, ProtocolVersion, RequestControl,
+    RequestSnapshot, RowData, ScreenDelta, ScreenSnapshot, SpecialKey, StreamEnvelope,
 };
 
 #[derive(Parser, Debug)]
@@ -133,17 +134,23 @@ struct Metrics {
     session_name: String,
     client_id: u64,
     connect_time_ms: u64,
+    connect_times: Vec<u64>,
     total_duration_ms: u64,
     rtt_samples: Vec<u32>,
     rtt_min_ms: u32,
     rtt_avg_ms: f64,
     rtt_max_ms: u32,
     deltas_received: u64,
+    deltas_via_datagram: u64,
+    deltas_via_stream: u64,
+    base_mismatches: u64,
     snapshots_received: u64,
+    snapshots_requested: u64,
     inputs_sent: u64,
     inputs_acked: u64,
     prediction_count: u64,
     reconnect_count: u64,
+    datagram_decode_errors: u64,
     errors: Vec<String>,
 }
 
@@ -570,15 +577,55 @@ fn char_to_input_event(c: char) -> InputEvent {
     }
 }
 
-fn load_resume_token() -> Vec<u8> {
-    fs::read(RESUME_TOKEN_FILE).unwrap_or_default()
+fn load_resume_token() -> Option<Vec<u8>> {
+    match std::fs::read(RESUME_TOKEN_FILE) {
+        Ok(data) if !data.is_empty() => Some(data),
+        Ok(_) => None,
+        Err(_) => None,
+    }
 }
 
+#[cfg(unix)]
+fn save_resume_token(token: &[u8]) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if token.is_empty() {
+        let _ = fs::remove_file(RESUME_TOKEN_FILE);
+        return;
+    }
+
+    let path = format!("{}-{}", RESUME_TOKEN_FILE, std::process::id());
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(token) {
+                log::warn!("Failed to write resume token: {}", e);
+                return;
+            }
+            if let Err(e) = std::fs::rename(&path, RESUME_TOKEN_FILE) {
+                log::warn!("Failed to rename resume token file: {}", e);
+                let _ = std::fs::remove_file(&path);
+            }
+        },
+        Err(e) => {
+            log::warn!("Failed to create resume token file: {}", e);
+        },
+    }
+}
+
+#[cfg(not(unix))]
 fn save_resume_token(token: &[u8]) {
     if token.is_empty() {
         let _ = fs::remove_file(RESUME_TOKEN_FILE);
-    } else {
-        let _ = fs::write(RESUME_TOKEN_FILE, token);
+    } else if let Err(e) = std::fs::write(RESUME_TOKEN_FILE, token) {
+        log::warn!("Failed to save resume token: {}", e);
     }
 }
 
@@ -635,6 +682,8 @@ impl ClientState {
     }
 }
 
+static CONNECT_COUNT: AtomicU64 = AtomicU64::new(0);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -647,10 +696,17 @@ async fn main() -> Result<()> {
         eprintln!("Cleared stored resume token");
     }
 
+    let config = ClientConfig::builder()
+        .with_bind_default()
+        .with_no_cert_validation()
+        .build();
+
+    let endpoint = Endpoint::client(config)?;
+
     let mut reconnect_attempts = 0u64;
 
     loop {
-        let result = run_connection(&mut state).await;
+        let result = run_connection(&endpoint, &mut state).await;
 
         match result {
             Ok(ClientResult::ScriptQuit) | Ok(ClientResult::Shutdown) => {
@@ -709,10 +765,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_connection(state: &mut ClientState) -> Result<ClientResult> {
+async fn run_connection(
+    endpoint: &Endpoint<wtransport::endpoint::endpoint_side::Client>,
+    state: &mut ClientState,
+) -> Result<ClientResult> {
     let bearer_token = state.args.token.as_ref().map(|s| s.as_bytes().to_vec()).unwrap_or_default();
 
-    let resume_token = load_resume_token();
+    let resume_token = load_resume_token().unwrap_or_default();
     if !resume_token.is_empty() {
         eprintln!(
             "Found stored resume token ({} bytes), will attempt resume",
@@ -724,19 +783,32 @@ async fn run_connection(state: &mut ClientState) -> Result<ClientResult> {
         eprintln!("Using bearer token ({} bytes)", bearer_token.len());
     }
 
-    let config = ClientConfig::builder()
-        .with_bind_default()
-        .with_no_cert_validation()
-        .build();
-
     let connect_start = Instant::now();
     eprintln!("Connecting to {}...", state.args.server_url);
-    let connection = Endpoint::client(config)?
+    let connection = endpoint
         .connect(&state.args.server_url)
         .await
         .context("failed to connect to server")?;
 
-    state.metrics.connect_time_ms = connect_start.elapsed().as_millis() as u64;
+    let connect_time_ms = connect_start.elapsed().as_millis() as u64;
+    let count = CONNECT_COUNT.fetch_add(1, Ordering::Relaxed);
+    let likely_0rtt = count > 0 && connect_time_ms < 100;
+
+    log::info!(
+        "Connect #{}: {:.2}ms {}",
+        count,
+        connect_time_ms as f64,
+        if likely_0rtt { "(likely 0-RTT)" } else { "" }
+    );
+    eprintln!(
+        "Connect #{}: {}ms{}",
+        count,
+        connect_time_ms,
+        if likely_0rtt { " (likely 0-RTT)" } else { "" }
+    );
+
+    state.metrics.connect_time_ms = connect_time_ms;
+    state.metrics.connect_times.push(connect_time_ms);
     eprintln!("Connected! Opening bidirectional stream...");
     let (mut send, mut recv) = connection.open_bi().await?.await?;
 
@@ -748,7 +820,7 @@ async fn run_connection(state: &mut ClientState) -> Result<ClientResult> {
                 minor: zellij_remote_protocol::ZRP_VERSION_MINOR,
             }),
             capabilities: Some(Capabilities {
-                supports_datagrams: false,
+                supports_datagrams: true,
                 max_datagram_bytes: zellij_remote_protocol::DEFAULT_MAX_DATAGRAM_BYTES,
                 supports_style_dictionary: true,
                 supports_styled_underlines: false,
@@ -773,7 +845,7 @@ async fn run_connection(state: &mut ClientState) -> Result<ClientResult> {
         execute!(stdout, EnterAlternateScreen, Hide, Clear(ClearType::All))?;
         terminal::enable_raw_mode()?;
 
-        let result = run_client_loop(&mut send, &mut recv, state).await;
+        let result = run_client_loop(&connection, &mut send, &mut recv, state).await;
 
         terminal::disable_raw_mode()?;
         execute!(stdout, Show, LeaveAlternateScreen)?;
@@ -842,6 +914,7 @@ async fn run_client_loop_headless(
 }
 
 async fn run_client_loop(
+    connection: &wtransport::Connection,
     send: &mut wtransport::SendStream,
     recv: &mut wtransport::RecvStream,
     state: &mut ClientState,
@@ -853,6 +926,9 @@ async fn run_client_loop(
     let mut is_controller = false;
     let mut input_sender = InputSender::new(256);
     let mut prediction_engine = PredictionEngine::new();
+    let mut last_applied_state_id: u64 = 0;
+    let mut consecutive_mismatches: u32 = 0;
+    let mut snapshot_in_flight: bool = false;
 
     let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(64);
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -975,6 +1051,9 @@ async fn run_client_loop(
                             confirmed_screen.apply_snapshot(&snapshot);
                             render_screen(&confirmed_screen, 0)?;
                             snapshot_received = true;
+                            snapshot_in_flight = false;
+                            last_applied_state_id = snapshot.state_id;
+                            consecutive_mismatches = 0;
                             state.metrics.snapshots_received += 1;
                         }
 
@@ -997,11 +1076,14 @@ async fn run_client_loop(
                             );
 
                             confirmed_screen.apply_delta(&delta);
+                            last_applied_state_id = delta.state_id;
+                            consecutive_mismatches = 0;
 
                             let display = confirmed_screen.clone_with_overlay(&prediction_engine);
                             render_screen(&display, prediction_engine.pending_count())?;
                             _delta_count += 1;
                             state.metrics.deltas_received += 1;
+                            state.metrics.deltas_via_stream += 1;
                         }
                         Some(stream_envelope::Msg::InputAck(ack)) => {
                             match input_sender.process_ack(&ack) {
@@ -1061,6 +1143,85 @@ async fn run_client_loop(
                         state.script_index = script_index_update.load(Ordering::Relaxed) as usize;
                         return Ok(ClientResult::ScriptQuit);
                     },
+                }
+            }
+            datagram_result = connection.receive_datagram() => {
+                match datagram_result {
+                    Ok(datagram) => {
+                        match decode_datagram_envelope(&datagram) {
+                            Ok(envelope) => {
+                            match envelope.msg {
+                                Some(datagram_envelope::Msg::ScreenDelta(delta)) => {
+                                    if !snapshot_received {
+                                        continue;
+                                    }
+
+                                    // First: Drop old/duplicate datagrams
+                                    if delta.state_id <= last_applied_state_id {
+                                        log::trace!(
+                                            "Dropping old/duplicate datagram: state_id={} <= last_applied={}",
+                                            delta.state_id,
+                                            last_applied_state_id
+                                        );
+                                        continue;
+                                    }
+
+                                    // Second: Check base mismatch
+                                    if delta.base_state_id != last_applied_state_id {
+                                        consecutive_mismatches += 1;
+                                        state.metrics.base_mismatches += 1;
+
+                                        if consecutive_mismatches >= 3 && !snapshot_in_flight {
+                                            let request = StreamEnvelope {
+                                                msg: Some(stream_envelope::Msg::RequestSnapshot(RequestSnapshot {
+                                                    reason: request_snapshot::Reason::BaseMismatch as i32,
+                                                    known_state_id: last_applied_state_id,
+                                                })),
+                                            };
+                                            let encoded = encode_envelope(&request)?;
+                                            send.write_all(&encoded).await?;
+                                            state.metrics.snapshots_requested += 1;
+                                            snapshot_in_flight = true;
+                                            consecutive_mismatches = 0;
+                                        } else if snapshot_in_flight {
+                                            log::trace!("Ignoring mismatch while snapshot in flight");
+                                        }
+                                        continue;
+                                    }
+
+                                    let server_cursor = CoreCursor {
+                                        col: delta.cursor.as_ref().map(|c| c.col).unwrap_or(confirmed_screen.cursor.col),
+                                        row: delta.cursor.as_ref().map(|c| c.row).unwrap_or(confirmed_screen.cursor.row),
+                                        visible: true,
+                                        blink: true,
+                                        shape: CursorShape::Block,
+                                    };
+
+                                    prediction_engine.reconcile(
+                                        delta.delivered_input_watermark,
+                                        &server_cursor,
+                                    );
+
+                                    confirmed_screen.apply_delta(&delta);
+                                    last_applied_state_id = delta.state_id;
+                                    consecutive_mismatches = 0;
+
+                                    let display = confirmed_screen.clone_with_overlay(&prediction_engine);
+                                    render_screen(&display, prediction_engine.pending_count())?;
+                                    _delta_count += 1;
+                                    state.metrics.deltas_received += 1;
+                                    state.metrics.deltas_via_datagram += 1;
+                                }
+                                _ => {}
+                            }
+                            }
+                            Err(e) => {
+                                log::trace!("Datagram decode error: {}", e);
+                                state.metrics.datagram_decode_errors += 1;
+                            }
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {

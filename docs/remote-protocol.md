@@ -30,6 +30,13 @@ cargo run --example spike_client -p zellij-remote-bridge -- \
 # With reconnection support
 cargo run --example spike_client -p zellij-remote-bridge -- \
   --reconnect=always --token "$ZELLIJ_REMOTE_TOKEN"
+
+# View datagram metrics on exit
+# === Render Metrics ===
+# Deltas via datagram: 150
+# Deltas via stream:   2
+# Snapshots received:  1
+# Base mismatches:     0
 ```
 
 ## Crates
@@ -111,7 +118,23 @@ bridge.run().await?;
 ### Transport
 - **WebTransport over QUIC** - Low latency, multiplexed streams
 - **Input**: Reliable streams for exactly-once, in-order delivery
-- **Render**: Datagrams for small deltas (lossy OK), streams for snapshots
+- **Render**: 
+  - **Datagrams** for small deltas (≤1200 bytes) - lower latency, unreliable
+  - **Streams** for large deltas and snapshots - reliable delivery
+  - Client handles datagram loss via base mismatch detection
+  - After 3 consecutive mismatches, client requests snapshot resync
+
+### Datagram Handling
+- Server checks `transport_supported && client_advertised && server_negotiated`
+- Conservative size limit: `min(connection.max_datagram_size, 1200)` bytes
+- Client filters old/duplicate datagrams by `state_id`
+- Client tracks `base_state_id` mismatches and requests resync if needed
+
+### 0-RTT Session Resumption
+- Client reuses `Endpoint` across reconnections for TLS session ticket reuse
+- First connection: Full TLS handshake (~1.5 RTT)
+- Subsequent connections: 0-RTT early data (~0.5 RTT)
+- **Security note**: Early data is replayable - only idempotent messages in first flight
 
 ### State Sync
 - Server maintains authoritative screen state in `FrameStore`
@@ -205,6 +228,8 @@ See [docs/plans/2024-12-31-zrp-implementation-status.md](plans/2024-12-31-zrp-im
 - ✅ Resume tokens
 - ✅ Client-side prediction
 - ✅ Zellij integration (Phase 7 + 7.5)
+- ✅ QUIC datagrams for screen deltas
+- ✅ 0-RTT session resumption
 - 🔲 Mobile client library
 
 ## Running with Zellij
