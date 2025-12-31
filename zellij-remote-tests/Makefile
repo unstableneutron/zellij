@@ -79,12 +79,17 @@ test-local-auth: build
 test-local-reconnect: build
 	@./scripts/test-reconnect.sh $(PROJECT_ROOT)
 
+# Test datagrams and 0-RTT
+test-local-datagram: build
+	@./scripts/test-datagrams-0rtt.sh $(PROJECT_ROOT)
+
 # Run all local tests
 test-all: build
 	@echo "=== Running all E2E tests ==="
 	@./scripts/test-basic.sh $(PROJECT_ROOT)
 	@./scripts/test-auth.sh $(PROJECT_ROOT)
 	@./scripts/test-reconnect.sh $(PROJECT_ROOT)
+	@./scripts/test-datagrams-0rtt.sh $(PROJECT_ROOT)
 	@echo "=== All tests passed ==="
 
 #------------------------------------------------------------------------------
