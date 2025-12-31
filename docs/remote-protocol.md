@@ -198,6 +198,7 @@ make test-all
 make test-local           # Basic connectivity
 make test-local-auth      # Authentication (valid/invalid/no token)
 make test-local-reconnect # Reconnection and metrics
+make test-local-datagram  # Datagram negotiation and 0-RTT
 ```
 
 ### Server-Side Test Knobs
