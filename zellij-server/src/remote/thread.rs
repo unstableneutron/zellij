@@ -307,7 +307,7 @@ async fn handle_instruction(
     match instruction {
         RemoteInstruction::FrameReady {
             client_id: _,
-            frame_store,
+            mut frame_store,
             style_table,
         } => {
             let knobs = TestKnobs::get();
@@ -315,19 +315,63 @@ async fn handle_instruction(
             // M2: Clone data needed for sending before releasing lock
             let (updates_to_send, delay_ms): (Vec<(u64, RenderUpdate, usize)>, Option<u64>) = {
                 let mut state = shared_state.write().await;
-                state.current_frame = Some(frame_store.clone());
                 state.frame_count = state.frame_count.wrapping_add(1);
+                let is_first_frame = state.frame_count == 1;
                 *state.manager.style_table_mut() = style_table;
 
+                // Extract info from incoming frame before mutating
+                let incoming_cols = frame_store.current_frame().cols;
+                let incoming_rows = frame_store.current_frame().rows.len();
+                let incoming_cursor = frame_store.current_frame().cursor;
+                
+                // Take dirty_rows before borrowing session
+                let dirty_rows = frame_store.take_dirty_rows();
+                
                 let session = state.manager.session_mut();
-                for (row_idx, row) in frame_store.current_frame().rows.iter().enumerate() {
-                    session.frame_store.set_row(row_idx, row.0.as_ref().clone());
+                
+                // Check for dimension changes - requires full redraw
+                let session_cols = session.frame_store.current_frame().cols;
+                let session_rows = session.frame_store.current_frame().rows.len();
+                let dimension_changed = session_cols != incoming_cols 
+                    || session_rows != incoming_rows;
+                
+                // Determine if we need full copy:
+                // 1. First frame - need complete initial state
+                // 2. Dimension changed - resize invalidates all rows
+                let needs_full_copy = is_first_frame || dimension_changed;
+                
+                if dimension_changed {
+                    session.frame_store.resize(incoming_cols, incoming_rows);
                 }
-                session.frame_store.set_cursor(frame_store.current_frame().cursor);
+                
+                if needs_full_copy {
+                    // Copy all rows for initial frame or after resize
+                    for (row_idx, row) in frame_store.current_frame().rows.iter().enumerate() {
+                        session.frame_store.set_row(row_idx, row.0.as_ref().clone());
+                    }
+                } else if !dirty_rows.is_empty() {
+                    // Normal case: only copy dirty rows (the optimization!)
+                    for row_idx in &dirty_rows {
+                        if let Some(row) = frame_store.current_frame().rows.get(*row_idx) {
+                            session.frame_store.set_row(*row_idx, row.0.as_ref().clone());
+                        }
+                    }
+                }
+                // If dirty_rows is empty and not first frame/resize, only cursor updates
+                // (no row copying needed - this is a cursor-only frame)
+                
+                session.frame_store.set_cursor(incoming_cursor);
                 session.frame_store.advance_state();
                 session.record_state_snapshot();
-
+                session.clear_dirty_rows_cache();
+                
                 let _state_id = session.frame_store.current_state_id();
+                
+                // Release session borrow before assigning to state
+                let _ = session;
+                
+                // Store for debugging
+                state.current_frame = Some(frame_store);
 
                 let force_snapshot = knobs
                     .force_snapshot_every
