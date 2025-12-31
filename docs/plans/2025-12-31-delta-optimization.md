@@ -739,30 +739,47 @@ Expected: Success
 - [x] Row patches are in deterministic (sorted) order
 - [x] Style-only changes detected
 - [x] New rows not duplicated when dirty_rows provided (Oracle fix)
-- [x] All existing tests pass (140 tests)
+- [x] All existing tests pass (141 tests)
 - [x] All new unit tests pass (7 added)
 - [x] cargo build passes
-- [ ] E2E tests pass (manual verification needed)
+- [x] E2E tests pass (manual verification completed 2025-01-01)
 
 ## Implementation Complete (2025-01-01)
 
 All tasks implemented and Oracle review issues addressed.
 
-## Post-Implementation Testing
+## Critical Integration Fix (2025-01-01)
 
-After implementation, verify delta sizes with manual testing:
+During E2E testing, discovered that `RemoteInstruction::ClientConnected` was defined and handled in `thread.rs` but **never sent from anywhere**. This caused `active_zellij_client` to remain `None`, dropping all remote client input.
+
+**Fix:** Added notifications in `zellij-server/src/screen.rs`:
+- `Screen::add_client()` now sends `RemoteInstruction::ClientConnected`
+- `Screen::remove_client()` now sends `RemoteInstruction::ClientDisconnected` and auto-selects next client
+
+## E2E Test Results (2025-01-01)
 
 ```bash
-# On sjc3 (Tailscale):
-ZELLIJ_REMOTE_ADDR=0.0.0.0:4433 ZELLIJ_REMOTE_TOKEN=test123 ./target/release/zellij
+# Start Zellij with remote
+ZELLIJ_REMOTE_ADDR=127.0.0.1:4433 cargo run --release --features remote
 
-# On local machine:
-SERVER_URL="https://100.69.153.168:4433" ZELLIJ_REMOTE_TOKEN=test123 \
-    cargo run --release --example spike_client -p zellij-remote-bridge
+# Connect with spike_client
+cargo run --release --example spike_client -p zellij-remote-bridge -- \
+  --server-url https://127.0.0.1:4433 --metrics-out /tmp/spike-metrics.json
 ```
 
-Type "echo hello" and observe metrics:
-- Before: deltas ~9KB (stream delivery)
-- After: deltas ~50-200 bytes (datagram delivery)
+**Metrics after typing commands:**
+```json
+{
+  "deltas_received": 3,
+  "deltas_via_datagram": 2,
+  "deltas_via_stream": 1,
+  "inputs_sent": 15,
+  "inputs_acked": 14
+}
+```
 
-Check for `Deltas via datagram: N` in metrics output.
+**Results:**
+- ✅ Input successfully routed to Zellij panes
+- ✅ Deltas generated on keystroke (was 0 before fix)
+- ✅ 2 out of 3 deltas fit in QUIC datagrams (<1200 bytes)
+- ✅ Large output (ls -la) correctly falls back to stream

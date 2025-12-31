@@ -1945,7 +1945,21 @@ impl Screen {
             .get_mut(&tab_index)
             .with_context(|| err_context(tab_index))?
             .add_client(client_id, None)
-            .with_context(|| err_context(tab_index))
+            .with_context(|| err_context(tab_index))?;
+
+        #[cfg(feature = "remote")]
+        {
+            let size = zellij_utils::pane_size::Size {
+                rows: self.size.rows,
+                cols: self.size.cols,
+            };
+            let _ = self.bus.senders.send_to_remote(RemoteInstruction::ClientConnected {
+                client_id,
+                size,
+            });
+        }
+
+        Ok(())
     }
 
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
@@ -1981,6 +1995,28 @@ impl Screen {
             self.tab_history.remove(&client_id);
         }
         self.connected_clients.borrow_mut().remove(&client_id);
+
+        #[cfg(feature = "remote")]
+        {
+            let _ = self.bus.senders.send_to_remote(RemoteInstruction::ClientDisconnected {
+                client_id,
+            });
+
+            // If another client is still connected, notify remote thread so input routing continues
+            if let Some(&next_client_id) = self.connected_clients.borrow().keys().next() {
+                if !self.watcher_clients.contains_key(&next_client_id) {
+                    let size = zellij_utils::pane_size::Size {
+                        rows: self.size.rows,
+                        cols: self.size.cols,
+                    };
+                    let _ = self.bus.senders.send_to_remote(RemoteInstruction::ClientConnected {
+                        client_id: next_client_id,
+                        size,
+                    });
+                }
+            }
+        }
+
         self.log_and_report_session_state()
             .with_context(err_context)
     }

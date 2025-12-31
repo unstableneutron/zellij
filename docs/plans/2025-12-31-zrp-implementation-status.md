@@ -1,6 +1,6 @@
 # ZRP Implementation Status
 
-**Last Updated:** 2024-12-31 (E2E Testing Infrastructure Complete)
+**Last Updated:** 2025-01-01 (Delta Optimization & Client Routing Fix)
 
 ## Overview
 
@@ -21,6 +21,7 @@ The Zellij Remote Protocol (ZRP) enables Mosh-style remote terminal access over 
 | Phase 7 | Zellij Integration | ✅ Complete |
 | Phase 7.5 | Full E2E Wiring | ✅ Complete |
 | Phase 7.6 | E2E Testing Infrastructure | ✅ Complete |
+| Phase 7.7 | Delta Optimization | ✅ Complete |
 | Phase 8 | Mobile Client Library | 🔲 Not Started |
 
 ## Crate Structure
@@ -282,6 +283,38 @@ cd zellij-remote-tests
 make build        # Build binaries
 make test-all     # Run all tests
 ```
+
+## Phase 7.7: Delta Optimization (Completed 2025-01-01)
+
+Reduced screen delta sizes from ~9KB to fit within QUIC datagrams (<1200 bytes).
+
+### Optimizations Implemented
+
+1. **dirty_rows tracking**: Only process rows marked dirty by FrameStore, instead of comparing all 24 rows
+2. **Intra-row diffing**: Emit sparse `CellRun`s containing only changed columns, instead of full 80-cell rows
+3. **dirty_rows caching**: Cache dirty_rows per state_id in RemoteSession so all clients reuse the same set
+
+### Critical Integration Fix
+
+During E2E testing, discovered `RemoteInstruction::ClientConnected` was never sent from screen.rs, causing `active_zellij_client` to remain `None` and all remote input to be dropped.
+
+**Fix:** Added notifications in `zellij-server/src/screen.rs`:
+- `Screen::add_client()` sends `RemoteInstruction::ClientConnected`
+- `Screen::remove_client()` sends `RemoteInstruction::ClientDisconnected` and auto-selects next client
+
+### E2E Validation Results
+
+```json
+{
+  "deltas_received": 3,
+  "deltas_via_datagram": 2,
+  "deltas_via_stream": 1
+}
+```
+
+- ✅ 2 out of 3 deltas fit in QUIC datagrams
+- ✅ Large output correctly falls back to stream
+- ✅ 141 unit tests pass
 
 ## Next Steps
 
