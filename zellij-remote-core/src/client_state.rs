@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::backpressure::RenderWindow;
 use crate::delta::DeltaEngine;
 use crate::frame::FrameData;
@@ -48,6 +50,7 @@ impl ClientRenderState {
         current_frame: &FrameData,
         current_state_id: u64,
         style_table: &mut StyleTable,
+        dirty_rows: Option<&HashSet<usize>>,
     ) -> Option<ScreenDelta> {
         let baseline = self.acked_baseline.as_ref()?;
 
@@ -61,6 +64,7 @@ impl ClientRenderState {
             style_table,
             self.acked_baseline_state_id,
             current_state_id,
+            dirty_rows,
         );
 
         self.render_window.mark_sent(current_state_id);

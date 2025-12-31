@@ -142,6 +142,12 @@ bridge.run().await?;
 - Deltas computed from client's acked baseline (cumulative, not chained)
 - Baselines only advance on StateAck - prevents issues with lost datagrams
 
+### Delta Optimization
+- **Dirty row tracking**: Only rows marked dirty by FrameStore are included in deltas
+- **Intra-row diffing**: Only changed columns within a row are encoded as sparse `CellRun`s
+- **Result**: Keystroke deltas typically 50-200 bytes (fits in QUIC datagrams)
+- **Fallback**: When dirty_rows unavailable, falls back to Arc::ptr_eq comparison
+
 ### Controller Lease
 - Only one client can control resize/input at a time
 - `ExplicitOnly` policy: explicit request required for takeover

@@ -153,7 +153,7 @@ fn test_client_state_prepare_delta_requires_baseline() {
     let mut style_table = StyleTable::new();
     let frame = FrameData::new(80, 24);
 
-    let delta = state.prepare_delta(&frame, 1, &mut style_table);
+    let delta = state.prepare_delta(&frame, 1, &mut style_table, None);
     assert!(delta.is_none());
 }
 
@@ -166,7 +166,7 @@ fn test_client_state_prepare_delta_after_snapshot() {
 
     let _ = state.prepare_snapshot(&frame1, 1, &mut style_table);
 
-    let delta = state.prepare_delta(&frame2, 2, &mut style_table);
+    let delta = state.prepare_delta(&frame2, 2, &mut style_table, None);
     assert!(delta.is_some());
     let delta = delta.unwrap();
     assert_eq!(delta.base_state_id, 1);
@@ -180,10 +180,10 @@ fn test_client_state_blocks_delta_when_exhausted() {
     let frame = FrameData::new(80, 24);
 
     let _ = state.prepare_snapshot(&frame, 1, &mut style_table);
-    let _ = state.prepare_delta(&frame, 2, &mut style_table);
+    let _ = state.prepare_delta(&frame, 2, &mut style_table, None);
 
     assert!(!state.can_send());
-    let delta = state.prepare_delta(&frame, 3, &mut style_table);
+    let delta = state.prepare_delta(&frame, 3, &mut style_table, None);
     assert!(delta.is_none());
 }
 

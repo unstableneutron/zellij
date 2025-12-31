@@ -42,13 +42,13 @@ fn test_delta_only_uses_acked_baseline() {
 
     let _ = state.prepare_snapshot(&frame1, 1, &mut style_table);
 
-    let delta1 = state.prepare_delta(&frame2, 2, &mut style_table);
+    let delta1 = state.prepare_delta(&frame2, 2, &mut style_table, None);
     assert!(delta1.is_some());
     let delta1 = delta1.unwrap();
     assert_eq!(delta1.base_state_id, 1);
     assert_eq!(delta1.state_id, 2);
 
-    let delta2 = state.prepare_delta(&frame3, 3, &mut style_table);
+    let delta2 = state.prepare_delta(&frame3, 3, &mut style_table, None);
     assert!(delta2.is_some());
     let delta2 = delta2.unwrap();
     assert_eq!(delta2.base_state_id, 1);
@@ -64,7 +64,7 @@ fn test_delta_only_uses_acked_baseline() {
     state.process_state_ack(&ack);
     state.advance_baseline(2, frame2.clone());
 
-    let delta3 = state.prepare_delta(&frame3, 4, &mut style_table);
+    let delta3 = state.prepare_delta(&frame3, 4, &mut style_table, None);
     assert!(delta3.is_some());
     let delta3 = delta3.unwrap();
     assert_eq!(delta3.base_state_id, 2);

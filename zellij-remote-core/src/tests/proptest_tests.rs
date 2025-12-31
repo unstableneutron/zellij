@@ -99,6 +99,7 @@ proptest! {
             &mut style_table,
             baseline.state_id,
             current.state_id,
+            None,
         );
 
         prop_assert_eq!(delta.row_patches.len(), 1);
@@ -123,6 +124,7 @@ proptest! {
             &mut style_table,
             baseline.state_id,
             current.state_id,
+            None,
         );
 
         for patch in &delta.row_patches {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,6 +55,8 @@ pub struct RemoteSession {
     token_expiry_ms: u64,
     max_clock_skew_ms: u64,
     token_secret: [u8; 32],
+    /// Cached dirty_rows for current state_id (cleared on state advance)
+    cached_dirty_rows: Option<(u64, HashSet<usize>)>,
 }
 
 impl RemoteSession {
@@ -77,6 +79,7 @@ impl RemoteSession {
             token_expiry_ms: DEFAULT_TOKEN_EXPIRY_MS,
             max_clock_skew_ms: DEFAULT_MAX_CLOCK_SKEW_MS,
             token_secret,
+            cached_dirty_rows: None,
         }
     }
 
@@ -146,20 +149,28 @@ impl RemoteSession {
     }
 
     pub fn get_render_update(&mut self, client_id: u64) -> Option<RenderUpdate> {
-        let client_state = self.clients.get_mut(&client_id)?;
-        let current_frame = self.frame_store.current_frame();
+        // Get cached dirty_rows for current state (captures from FrameStore on first call)
+        // Clone to avoid borrow conflict with frame_store
+        let dirty_rows = self.get_dirty_rows_for_current_state().clone();
+        let current_frame = self.frame_store.current_frame().clone();
         let current_state_id = self.frame_store.current_state_id();
+
+        let client_state = self.clients.get_mut(&client_id)?;
 
         if client_state.should_send_snapshot() {
             let snapshot = client_state.prepare_snapshot(
-                current_frame,
+                &current_frame,
                 current_state_id,
                 &mut self.style_table,
             );
             Some(RenderUpdate::Snapshot(snapshot))
         } else if client_state.can_send() {
-            let delta =
-                client_state.prepare_delta(current_frame, current_state_id, &mut self.style_table);
+            let delta = client_state.prepare_delta(
+                &current_frame,
+                current_state_id,
+                &mut self.style_table,
+                Some(&dirty_rows),
+            );
             delta.map(RenderUpdate::Delta)
         } else {
             None
@@ -274,6 +285,28 @@ impl RemoteSession {
     #[cfg(test)]
     pub fn token_secret(&self) -> &[u8; 32] {
         &self.token_secret
+    }
+
+    /// Get dirty_rows for current state, capturing from FrameStore on first call per state.
+    pub fn get_dirty_rows_for_current_state(&mut self) -> &HashSet<usize> {
+        let current_state_id = self.frame_store.current_state_id();
+
+        // Check if we have cached dirty_rows for current state
+        if let Some((cached_id, _)) = &self.cached_dirty_rows {
+            if *cached_id == current_state_id {
+                return &self.cached_dirty_rows.as_ref().unwrap().1;
+            }
+        }
+
+        // Capture dirty_rows from FrameStore and cache
+        let dirty = self.frame_store.take_dirty_rows();
+        self.cached_dirty_rows = Some((current_state_id, dirty));
+        &self.cached_dirty_rows.as_ref().unwrap().1
+    }
+
+    /// Clear dirty_rows cache (call when advancing to new state)
+    pub fn clear_dirty_rows_cache(&mut self) {
+        self.cached_dirty_rows = None;
     }
 }
 
