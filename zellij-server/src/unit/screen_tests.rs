@@ -357,6 +357,8 @@ impl MockScreen {
             Some(&self.to_server.clone()),
             Some(&self.to_pty_writer.clone()),
             Some(&self.to_background_jobs.clone()),
+            #[cfg(feature = "remote")]
+            None,
             Some(Box::new(self.os_input.clone())),
         )
         .should_silently_fail();
@@ -443,6 +445,8 @@ impl MockScreen {
             Some(&self.to_server.clone()),
             Some(&self.to_pty_writer.clone()),
             Some(&self.to_background_jobs.clone()),
+            #[cfg(feature = "remote")]
+            None,
             Some(Box::new(self.os_input.clone())),
         )
         .should_silently_fail();

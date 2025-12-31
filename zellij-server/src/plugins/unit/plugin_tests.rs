@@ -330,6 +330,8 @@ fn create_plugin_thread(
         Some(&to_server),
         Some(&to_pty_writer),
         Some(&to_background_jobs),
+        #[cfg(feature = "remote")]
+        None,
         None,
     )
     .should_silently_fail();
@@ -427,6 +429,8 @@ fn create_plugin_thread_with_server_receiver(
         Some(&to_server),
         Some(&to_pty_writer),
         Some(&to_background_jobs),
+        #[cfg(feature = "remote")]
+        None,
         None,
     )
     .should_silently_fail();
@@ -520,6 +524,8 @@ fn create_plugin_thread_with_pty_receiver(
         Some(&to_server),
         Some(&to_pty_writer),
         Some(&to_background_jobs),
+        #[cfg(feature = "remote")]
+        None,
         None,
     )
     .should_silently_fail();
@@ -608,6 +614,8 @@ fn create_plugin_thread_with_background_jobs_receiver(
         Some(&to_server),
         Some(&to_pty_writer),
         Some(&to_background_jobs),
+        #[cfg(feature = "remote")]
+        None,
         None,
     )
     .should_silently_fail();

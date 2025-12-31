@@ -50,6 +50,9 @@ use crate::{
     screen::{screen_thread_main, ScreenInstruction},
     thread_bus::{Bus, ThreadSenders},
 };
+
+#[cfg(feature = "remote")]
+use crate::remote::{remote_thread_main, RemoteConfig, RemoteInstruction};
 use route::{route_thread_main, NotificationEnd};
 use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
@@ -1696,6 +1699,21 @@ fn init_session(
         channels::unbounded();
     let to_background_jobs = SenderWithContext::new(to_background_jobs);
 
+    #[cfg(feature = "remote")]
+    let (to_remote, remote_receiver) = {
+        let remote_enabled = std::env::var("ZELLIJ_REMOTE_ENABLE").is_ok()
+            || std::env::var("ZELLIJ_REMOTE_ADDR").is_ok();
+
+        if remote_enabled {
+            let (to_remote_sender, remote_receiver): ChannelWithContext<RemoteInstruction> =
+                channels::bounded(50);
+            let to_remote = SenderWithContext::new(to_remote_sender);
+            (Some(to_remote), Some(remote_receiver))
+        } else {
+            (None, None)
+        }
+    };
+
     // Determine and initialize the data directory
     let data_dir = cli_assets.data_dir.unwrap_or_else(get_default_data_dir);
 
@@ -1741,6 +1759,8 @@ fn init_session(
                     Some(&to_server),
                     Some(&to_pty_writer),
                     Some(&to_background_jobs),
+                    #[cfg(feature = "remote")]
+                    to_remote.as_ref(),
                     Some(os_input.clone()),
                 ),
                 cli_assets.is_debug,
@@ -1764,6 +1784,8 @@ fn init_session(
                 Some(&to_server),
                 Some(&to_pty_writer),
                 Some(&to_background_jobs),
+                #[cfg(feature = "remote")]
+                to_remote.as_ref(),
                 Some(os_input.clone()),
             );
             let max_panes = cli_assets.max_panes;
@@ -1798,6 +1820,8 @@ fn init_session(
                 Some(&to_server),
                 Some(&to_pty_writer),
                 Some(&to_background_jobs),
+                #[cfg(feature = "remote")]
+                to_remote.as_ref(),
                 None,
             );
             let engine = get_engine();
@@ -1842,6 +1866,8 @@ fn init_session(
                 Some(&to_server),
                 None,
                 Some(&to_background_jobs),
+                #[cfg(feature = "remote")]
+                to_remote.as_ref(),
                 Some(os_input.clone()),
             );
             || pty_writer_main(pty_writer_bus).fatal()
@@ -1859,6 +1885,8 @@ fn init_session(
                 Some(&to_server),
                 Some(&to_pty_writer),
                 None,
+                #[cfg(feature = "remote")]
+                to_remote.as_ref(),
                 Some(os_input.clone()),
             );
             let web_server_base_url = web_server_base_url(
@@ -1878,6 +1906,40 @@ fn init_session(
             }
         })
         .unwrap();
+
+    #[cfg(feature = "remote")]
+    if let Some(remote_receiver) = remote_receiver {
+        let listen_addr: std::net::SocketAddr = std::env::var("ZELLIJ_REMOTE_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:4433".to_string())
+            .parse()
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "Failed to parse ZELLIJ_REMOTE_ADDR: {}, using default 127.0.0.1:4433",
+                    e
+                );
+                "127.0.0.1:4433".parse().unwrap()
+            });
+
+        let session_name = envs::get_session_name().unwrap_or_else(|_| "zellij".to_string());
+
+        let config = RemoteConfig {
+            listen_addr,
+            session_name,
+            initial_size: Size { cols: 80, rows: 24 },
+        };
+
+        let _remote_thread = thread::Builder::new()
+            .name("remote".to_string())
+            .spawn(move || {
+                if let Err(e) = remote_thread_main(remote_receiver, config) {
+                    log::error!("Remote thread error: {}", e);
+                }
+            })
+            .expect("failed to spawn remote thread");
+
+        log::info!("Remote thread spawned, listening on {}", listen_addr);
+    }
+
     if let Some(config_file_path) = cli_assets.config_file_path.clone() {
         report_changes_in_config_file(config_file_path, to_server.clone());
     }
@@ -1891,7 +1953,7 @@ fn init_session(
             to_background_jobs: Some(to_background_jobs),
             to_server: Some(to_server),
             #[cfg(feature = "remote")]
-            to_remote: None,
+            to_remote,
             should_silently_fail: false,
         },
         capabilities,

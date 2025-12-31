@@ -189,6 +189,35 @@ pub(crate) struct Bus<T> {
 }
 
 impl<T> Bus<T> {
+    #[cfg(feature = "remote")]
+    pub fn new(
+        receivers: Vec<channels::Receiver<(T, ErrorContext)>>,
+        to_screen: Option<&SenderWithContext<ScreenInstruction>>,
+        to_pty: Option<&SenderWithContext<PtyInstruction>>,
+        to_plugin: Option<&SenderWithContext<PluginInstruction>>,
+        to_server: Option<&SenderWithContext<ServerInstruction>>,
+        to_pty_writer: Option<&SenderWithContext<PtyWriteInstruction>>,
+        to_background_jobs: Option<&SenderWithContext<BackgroundJob>>,
+        to_remote: Option<&SenderWithContext<RemoteInstruction>>,
+        os_input: Option<Box<dyn ServerOsApi>>,
+    ) -> Self {
+        Bus {
+            receivers,
+            senders: ThreadSenders {
+                to_screen: to_screen.cloned(),
+                to_pty: to_pty.cloned(),
+                to_plugin: to_plugin.cloned(),
+                to_server: to_server.cloned(),
+                to_pty_writer: to_pty_writer.cloned(),
+                to_background_jobs: to_background_jobs.cloned(),
+                to_remote: to_remote.cloned(),
+                should_silently_fail: false,
+            },
+            os_input: os_input.clone(),
+        }
+    }
+
+    #[cfg(not(feature = "remote"))]
     pub fn new(
         receivers: Vec<channels::Receiver<(T, ErrorContext)>>,
         to_screen: Option<&SenderWithContext<ScreenInstruction>>,
@@ -208,8 +237,6 @@ impl<T> Bus<T> {
                 to_server: to_server.cloned(),
                 to_pty_writer: to_pty_writer.cloned(),
                 to_background_jobs: to_background_jobs.cloned(),
-                #[cfg(feature = "remote")]
-                to_remote: None,
                 should_silently_fail: false,
             },
             os_input: os_input.clone(),

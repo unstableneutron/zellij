@@ -74,7 +74,7 @@ async fn run_remote_server(
                 }
             },
             Err(e) => {
-                log::error!("Remote instruction channel closed: {}", e);
+                log::info!("Remote instruction channel closed (shutdown expected): {}", e);
                 break;
             },
         }
