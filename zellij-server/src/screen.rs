@@ -54,6 +54,9 @@ use crate::{
     ui::loading_indication::LoadingIndication,
     ClientId, ServerInstruction,
 };
+
+#[cfg(feature = "remote")]
+use crate::remote::{chunks_to_frame_store, RemoteInstruction};
 use zellij_utils::{
     data::{Event, InputMode, ModeInfo, Palette, PaletteColor, PluginCapabilities, Style, TabInfo},
     errors::{ContextType, ScreenContext},
@@ -1477,6 +1480,32 @@ impl Screen {
         Ok(())
     }
 
+    #[cfg(feature = "remote")]
+    fn send_to_remote(&self, output: &Output, connected_clients: &HashSet<ClientId>) {
+        use zellij_remote_core::StyleTable;
+
+        for &client_id in connected_clients {
+            if let Some(chunks) = output.get_client_character_chunks(client_id) {
+                if chunks.is_empty() {
+                    continue;
+                }
+
+                let size = self.size;
+
+                let mut style_table = StyleTable::new();
+                let frame_store =
+                    chunks_to_frame_store(chunks, size.cols, size.rows, &mut style_table);
+
+                let instruction = RemoteInstruction::FrameReady {
+                    client_id,
+                    frame_store,
+                };
+
+                let _ = self.bus.senders.send_to_remote(instruction);
+            }
+        }
+    }
+
     pub fn render_to_clients(&mut self) -> Result<()> {
         // this method does the actual rendering and is triggered by a debounced BackgroundJob (see
         // the render method for more details)
@@ -1523,6 +1552,14 @@ impl Screen {
                 .send_to_plugin(PluginInstruction::PaneRenderReport(pane_render_report));
 
             non_watcher_output_was_dirty = output.is_dirty();
+
+            #[cfg(feature = "remote")]
+            {
+                let connected_clients: HashSet<ClientId> =
+                    self.connected_clients.borrow().keys().copied().collect();
+                self.send_to_remote(&output, &connected_clients);
+            }
+
             if non_watcher_output_was_dirty {
                 let serialized_output = output.serialize().context(err_context)?;
                 let _ = self

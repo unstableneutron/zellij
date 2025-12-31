@@ -581,6 +581,10 @@ impl Output {
         self.client_character_chunks.values().any(|c| !c.is_empty())
             || self.sixel_chunks.values().any(|c| !c.is_empty())
     }
+    #[cfg(feature = "remote")]
+    pub fn get_client_character_chunks(&self, client_id: ClientId) -> Option<&Vec<CharacterChunk>> {
+        self.client_character_chunks.get(&client_id)
+    }
     pub fn cursor_is_visible(&mut self, cursor_x: usize, cursor_y: usize) -> bool {
         self.cursor_coordinates = Some((cursor_x, cursor_y));
         self.floating_panes_stack
