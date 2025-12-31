@@ -355,6 +355,37 @@ Wired up previously unwired RemoteInstruction variants:
 - SetControllerSize dimensions clamped to 500x500 max to prevent DoS
 - Resize is a viewport hint; doesn't update lease current_size
 
+## Cross-Machine Validation Checklist
+
+For validating ZRP over real networks (Tailscale, WAN):
+
+### Setup
+```bash
+# Server (remote Linux)
+ZELLIJ_REMOTE_ADDR=0.0.0.0:4433 ZELLIJ_REMOTE_TOKEN=<token> \
+  cargo run --release --features remote
+
+# Client (local Mac)
+cargo run --release --example spike_client -p zellij-remote-bridge -- \
+  --server-url https://<tailscale-ip>:4433 \
+  --token <token> \
+  --metrics-out /tmp/cross-machine-metrics.json
+```
+
+### Validation Points
+| Check | Success Criteria |
+|-------|------------------|
+| Datagrams viable | `deltas_via_datagram` >> `deltas_via_stream` |
+| No excessive resyncs | `base_mismatches` ≈ 0, `snapshots_received` ≈ 1 |
+| 0-RTT works | Reconnect time < 100ms on `--reconnect=once` |
+| Delta sizing | Keystroke deltas < 1200 bytes |
+| Input latency | RTT samples stable, no stalls |
+
+### Network Considerations
+- Tailscale MTU is lower than LAN; 1200-byte datagram cap is conservative
+- DERP relay vs direct affects latency
+- UDP may be degraded on some enterprise networks
+
 ## Next Steps
 
 ### Phase 8: Mobile Client Library (Future)
