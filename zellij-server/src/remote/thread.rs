@@ -8,7 +8,7 @@ use bytes::BytesMut;
 use prost::Message;
 use tokio::sync::{mpsc, RwLock};
 use wtransport::{Endpoint, Identity, ServerConfig};
-use zellij_remote_bridge::{encode_datagram_envelope, encode_envelope};
+use zellij_remote_bridge::{decode_datagram_envelope, encode_datagram_envelope, encode_envelope};
 use zellij_remote_core::{FrameStore, LeaseResult, RenderUpdate};
 use zellij_remote_protocol::{
     datagram_envelope, protocol_error, stream_envelope, Capabilities, ClientHello,
@@ -124,6 +124,8 @@ struct ClientConnection {
     max_datagram_size: Option<usize>,
     /// Whether datagrams are negotiated (transport AND client advertised AND server accepted)
     datagrams_negotiated: bool,
+    /// Handle to abort the datagram receive task on disconnect
+    datagram_task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Shared state between the main loop and connection handlers
@@ -146,6 +148,7 @@ enum ConnectionEvent {
         send: wtransport::SendStream,
         connection: wtransport::Connection,
         client_supports_datagrams: bool,
+        conn_event_tx: mpsc::Sender<ConnectionEvent>,
     },
     ClientDisconnected {
         remote_id: u64,
@@ -161,6 +164,10 @@ enum ConnectionEvent {
     RequestSnapshot {
         remote_id: u64,
         request: zellij_remote_protocol::RequestSnapshot,
+    },
+    StateAckReceived {
+        remote_id: u64,
+        ack: zellij_remote_protocol::StateAck,
     },
 }
 
@@ -678,6 +685,7 @@ async fn handle_connection(
         send,
         connection: connection.clone(),
         client_supports_datagrams,
+        conn_event_tx: conn_event_tx.clone(),
     }).await?;
 
     let mut buffer = BytesMut::new();
@@ -753,13 +761,61 @@ fn spawn_client_sender_task(
     });
 }
 
+fn spawn_datagram_receive_task(
+    remote_id: u64,
+    connection: wtransport::Connection,
+    conn_event_tx: mpsc::Sender<ConnectionEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match connection.receive_datagram().await {
+                Ok(datagram) => {
+                    match decode_datagram_envelope(&datagram) {
+                        Ok(envelope) => {
+                            if let Some(datagram_envelope::Msg::StateAck(ack)) = envelope.msg {
+                                log::trace!(
+                                    "Received StateAck from client {}: last_applied={}",
+                                    remote_id,
+                                    ack.last_applied_state_id
+                                );
+                                if conn_event_tx.try_send(ConnectionEvent::StateAckReceived { remote_id, ack }).is_err() {
+                                    log::debug!(
+                                        "Client {} StateAck channel full or closed, dropping ack",
+                                        remote_id,
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::trace!(
+                                "Failed to decode datagram from client {}: {}",
+                                remote_id,
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!(
+                        "Datagram receive error for client {} (connection closed?): {}",
+                        remote_id,
+                        e
+                    );
+                    break;
+                }
+            }
+        }
+        log::debug!("Client {} datagram receive task exiting", remote_id);
+    })
+}
+
 async fn handle_connection_event(
     shared_state: &Arc<RwLock<SharedState>>,
     clients: &mut HashMap<u64, ClientConnection>,
     event: ConnectionEvent,
 ) -> Result<()> {
     match event {
-        ConnectionEvent::ClientConnected { remote_id, send, connection, client_supports_datagrams } => {
+        ConnectionEvent::ClientConnected { remote_id, send, connection, client_supports_datagrams, conn_event_tx } => {
             let max_datagram_size = connection.max_datagram_size();
             let transport_supports = max_datagram_size.is_some();
             let datagrams_negotiated = transport_supports && client_supports_datagrams;
@@ -779,6 +835,12 @@ async fn handle_connection_event(
                 );
             }
 
+            let datagram_task_handle = if datagrams_negotiated {
+                Some(spawn_datagram_receive_task(remote_id, connection.clone(), conn_event_tx))
+            } else {
+                None
+            };
+
             let (tx, rx) = mpsc::channel::<StreamEnvelope>(CLIENT_CHANNEL_SIZE);
             spawn_client_sender_task(remote_id, send, rx);
             clients.insert(
@@ -789,12 +851,17 @@ async fn handle_connection_event(
                     connection,
                     max_datagram_size,
                     datagrams_negotiated,
+                    datagram_task_handle,
                 },
             );
             log::info!("Remote client {} added to active clients (total: {})", remote_id, clients.len());
         }
         ConnectionEvent::ClientDisconnected { remote_id } => {
-            clients.remove(&remote_id);
+            if let Some(client) = clients.remove(&remote_id) {
+                if let Some(handle) = client.datagram_task_handle {
+                    handle.abort();
+                }
+            }
             let mut state = shared_state.write().await;
             state.manager.session_mut().remove_client(remote_id);
             log::info!("Remote client {} removed (total: {})", remote_id, clients.len());
@@ -937,6 +1004,15 @@ async fn handle_connection_event(
 
             let mut state = shared_state.write().await;
             state.manager.session_mut().force_client_snapshot(remote_id);
+        }
+        ConnectionEvent::StateAckReceived { remote_id, ack } => {
+            let mut state = shared_state.write().await;
+            state.manager.session_mut().process_state_ack(remote_id, &ack);
+            log::trace!(
+                "Processed StateAck from client {}: last_applied={}, advancing baseline",
+                remote_id,
+                ack.last_applied_state_id
+            );
         }
     }
     Ok(())

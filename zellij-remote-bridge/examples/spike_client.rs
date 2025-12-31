@@ -23,11 +23,12 @@ const RESUME_TOKEN_FILE: &str = "/tmp/zellij-spike-resume-token";
 use zellij_remote_core::{
     AckResult, Confidence, Cursor as CoreCursor, CursorShape, InputSender, PredictionEngine,
 };
-use zellij_remote_bridge::decode_datagram_envelope;
+use zellij_remote_bridge::{decode_datagram_envelope, encode_datagram_envelope};
 use zellij_remote_protocol::{
     datagram_envelope, input_event, key_event, request_snapshot, stream_envelope, Capabilities,
-    ClientHello, InputEvent, KeyEvent, KeyModifiers, ProtocolVersion, RequestControl,
-    RequestSnapshot, RowData, ScreenDelta, ScreenSnapshot, SpecialKey, StreamEnvelope,
+    ClientHello, DatagramEnvelope, InputEvent, KeyEvent, KeyModifiers, ProtocolVersion,
+    RequestControl, RequestSnapshot, RowData, ScreenDelta, ScreenSnapshot, SpecialKey, StateAck,
+    StreamEnvelope,
 };
 
 #[derive(Parser, Debug)]
@@ -301,6 +302,36 @@ fn encode_envelope(envelope: &StreamEnvelope) -> Result<Vec<u8>> {
     prost::encoding::encode_varint(len as u64, &mut buf);
     envelope.encode(&mut buf)?;
     Ok(buf.to_vec())
+}
+
+fn send_state_ack(connection: &wtransport::Connection, state_id: u64, datagrams_negotiated: bool) {
+    if !datagrams_negotiated {
+        return;
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u32;
+
+    let ack = StateAck {
+        last_applied_state_id: state_id,
+        last_received_state_id: state_id,
+        client_time_ms: now_ms,
+        estimated_loss_ppm: 0,
+        srtt_ms: 0,
+    };
+
+    let envelope = DatagramEnvelope {
+        msg: Some(datagram_envelope::Msg::StateAck(ack)),
+    };
+    let encoded = encode_datagram_envelope(&envelope);
+
+    if let Err(e) = connection.send_datagram(&encoded) {
+        log::trace!("Failed to send StateAck datagram: {}", e);
+    } else {
+        log::trace!("Sent StateAck for state_id={}", state_id);
+    }
 }
 
 fn decode_envelope(buf: &mut BytesMut) -> Result<Option<StreamEnvelope>> {
@@ -929,6 +960,7 @@ async fn run_client_loop(
     let mut last_applied_state_id: u64 = 0;
     let mut consecutive_mismatches: u32 = 0;
     let mut snapshot_in_flight: bool = false;
+    let datagrams_negotiated = connection.max_datagram_size().is_some();
 
     let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(64);
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -1055,10 +1087,42 @@ async fn run_client_loop(
                             last_applied_state_id = snapshot.state_id;
                             consecutive_mismatches = 0;
                             state.metrics.snapshots_received += 1;
+                            send_state_ack(&connection, snapshot.state_id, datagrams_negotiated);
                         }
 
                         Some(stream_envelope::Msg::ScreenDeltaStream(delta)) => {
                             if !snapshot_received {
+                                continue;
+                            }
+
+                            if delta.state_id <= last_applied_state_id {
+                                log::trace!(
+                                    "Dropping old/duplicate stream delta: state_id={} <= last_applied={}",
+                                    delta.state_id,
+                                    last_applied_state_id
+                                );
+                                continue;
+                            }
+
+                            if delta.base_state_id != last_applied_state_id {
+                                consecutive_mismatches += 1;
+                                state.metrics.base_mismatches += 1;
+
+                                if consecutive_mismatches >= 3 && !snapshot_in_flight {
+                                    let request = StreamEnvelope {
+                                        msg: Some(stream_envelope::Msg::RequestSnapshot(RequestSnapshot {
+                                            reason: request_snapshot::Reason::BaseMismatch as i32,
+                                            known_state_id: last_applied_state_id,
+                                        })),
+                                    };
+                                    let encoded = encode_envelope(&request)?;
+                                    send.write_all(&encoded).await?;
+                                    state.metrics.snapshots_requested += 1;
+                                    snapshot_in_flight = true;
+                                    consecutive_mismatches = 0;
+                                } else if snapshot_in_flight {
+                                    log::trace!("Ignoring stream delta mismatch while snapshot in flight");
+                                }
                                 continue;
                             }
 
@@ -1084,6 +1148,7 @@ async fn run_client_loop(
                             _delta_count += 1;
                             state.metrics.deltas_received += 1;
                             state.metrics.deltas_via_stream += 1;
+                            send_state_ack(&connection, delta.state_id, datagrams_negotiated);
                         }
                         Some(stream_envelope::Msg::InputAck(ack)) => {
                             match input_sender.process_ack(&ack) {
@@ -1211,6 +1276,7 @@ async fn run_client_loop(
                                     _delta_count += 1;
                                     state.metrics.deltas_received += 1;
                                     state.metrics.deltas_via_datagram += 1;
+                                    send_state_ack(&connection, delta.state_id, datagrams_negotiated);
                                 }
                                 _ => {}
                             }

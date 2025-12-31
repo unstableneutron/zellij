@@ -316,6 +316,29 @@ During E2E testing, discovered `RemoteInstruction::ClientConnected` was never se
 - ✅ Large output correctly falls back to stream
 - ✅ 141 unit tests pass
 
+### StateAck Implementation (2025-01-01)
+
+Fixed base_mismatch issue causing excessive snapshot resyncs:
+
+**Root Cause:** Server's `acked_baseline_state_id` never advanced because:
+1. Client (spike_client) never sent StateAck after applying deltas
+2. Server never received datagrams to process StateAck
+
+**Fixes:**
+- Client: Added `send_state_ack()` after snapshot/delta application
+- Server: Added `spawn_datagram_receive_task()` to receive and route StateAck
+- Added monotonicity guard for stream deltas (prevent state regression)
+- Added task lifecycle management (abort on client disconnect)
+- Use `try_send` for ack forwarding (non-blocking)
+
+**E2E Validation Results:**
+| Metric | Before | After |
+|--------|--------|-------|
+| base_mismatches | 3 | 0 |
+| deltas_received | 3 | 12 |
+| deltas_via_datagram | 2 | 11 |
+| snapshots_received | 3 | 1 |
+
 ## Next Steps
 
 ### Phase 8: Mobile Client Library (Future)
