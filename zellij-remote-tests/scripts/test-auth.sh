@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2329  # cleanup() is invoked via trap
 # test-auth.sh - Test authentication for ZRP
 set -euo pipefail
 

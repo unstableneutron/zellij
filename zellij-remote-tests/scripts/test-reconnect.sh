@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2329  # cleanup() is invoked via trap
 # test-reconnect.sh - Reconnection and metrics tests for ZRP
 # Tests resume token persistence, reconnect modes, and metrics output
 set -euo pipefail

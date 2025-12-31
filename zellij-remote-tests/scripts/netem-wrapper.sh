@@ -20,7 +20,7 @@ set -euo pipefail
 
 INTERFACE="${1:-eth0}"
 PROFILE="${2:-clean}"
-DURATION="${3:-0}"  # 0 = run until killed
+DURATION="${3:-0}" # 0 = run until killed
 
 # Track if we've already cleaned up
 CLEANED_UP=false
@@ -34,18 +34,18 @@ cleanup() {
         return
     fi
     CLEANED_UP=true
-    
+
     log "CLEANUP: Removing all tc qdisc rules from $INTERFACE"
-    
+
     # Remove any existing qdisc - ignore errors if none exists
     tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
-    
+
     # Verify cleanup succeeded
     if tc qdisc show dev "$INTERFACE" | grep -q "netem"; then
         log "ERROR: Failed to remove netem rules!"
         exit 1
     fi
-    
+
     log "CLEANUP: Complete - $INTERFACE restored to normal"
 }
 
@@ -58,10 +58,10 @@ trap cleanup SIGQUIT
 
 apply_profile() {
     local profile="$1"
-    
+
     # Always clean first
     tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
-    
+
     case "$profile" in
         clean)
             log "Profile 'clean': No emulation applied"
@@ -101,7 +101,7 @@ apply_profile() {
             exit 1
             ;;
     esac
-    
+
     # Show current state
     log "Current qdisc configuration:"
     tc qdisc show dev "$INTERFACE"

@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2329  # cleanup() is invoked via trap
 # test-basic.sh - Basic connectivity test for ZRP
 # Uses unique session names to avoid killing user's real Zellij sessions
 set -euo pipefail

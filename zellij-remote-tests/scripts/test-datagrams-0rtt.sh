@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2329  # cleanup() is invoked via trap
 # test-datagrams-0rtt.sh - Tests for QUIC datagrams and 0-RTT session resumption
 set -euo pipefail
 
@@ -23,9 +24,18 @@ FAIL_COUNT=0
 SKIP_COUNT=0
 
 log() { echo "[test-datagram] $(date '+%H:%M:%S') $*"; }
-pass() { echo "✓ $1"; ((PASS_COUNT++)) || true; }
-fail() { echo "✗ $1"; ((FAIL_COUNT++)) || true; }
-skip() { echo "⊘ $1 (skipped)"; ((SKIP_COUNT++)) || true; }
+pass() {
+    echo "✓ $1"
+    ((PASS_COUNT++)) || true
+}
+fail() {
+    echo "✗ $1"
+    ((FAIL_COUNT++)) || true
+}
+skip() {
+    echo "⊘ $1 (skipped)"
+    ((SKIP_COUNT++)) || true
+}
 
 print_logs_on_failure() {
     if [[ -f "$SERVER_LOG" ]]; then
@@ -36,7 +46,10 @@ print_logs_on_failure() {
     if [[ -d "$ZELLIJ_LOG_DIR" ]]; then
         echo "--- Zellij log files (last 50 lines each) ---"
         for log in "$ZELLIJ_LOG_DIR"/*.log; do
-            [[ -f "$log" ]] && { echo "=== $log ==="; tail -50 "$log" || true; }
+            [[ -f "$log" ]] && {
+                echo "=== $log ==="
+                tail -50 "$log" || true
+            }
         done
         echo "--- End Zellij logs ---"
     fi
@@ -64,7 +77,11 @@ start_server() {
         ZELLIJ_REMOTE_TOKEN="$TEST_TOKEN" \
         RUST_LOG=zellij_server::remote=info \
         "$ZELLIJ" --session "$TEST_SESSION" </dev/null >"$SERVER_LOG" 2>&1 &
-    wait_for_port "$PORT" 20 || { fail "Server did not start"; print_logs_on_failure; return 1; }
+    wait_for_port "$PORT" 20 || {
+        fail "Server did not start"
+        print_logs_on_failure
+        return 1
+    }
     log "Server listening on port $PORT"
 }
 
@@ -94,7 +111,7 @@ sleep 1
 log "Test 1: Datagram metrics with activity"
 
 # Create a script that types some characters to generate deltas
-cat > "$SCRIPT_FILE" << 'EOF'
+cat >"$SCRIPT_FILE" <<'EOF'
 sleep 500
 type hello
 sleep 500
@@ -104,11 +121,11 @@ EOF
 start_server
 
 log "Running client with script to generate activity..."
-output=$(env -u ZELLIJ_REMOTE_TOKEN \
+env -u ZELLIJ_REMOTE_TOKEN \
     SERVER_URL="https://127.0.0.1:$PORT" \
     ZELLIJ_REMOTE_TOKEN="$TEST_TOKEN" \
     HEADLESS=1 \
-    timeout 15 "$SPIKE_CLIENT" --metrics-out "$METRICS_FILE" --script "$SCRIPT_FILE" 2>&1) || true
+    timeout 15 "$SPIKE_CLIENT" --metrics-out "$METRICS_FILE" --script "$SCRIPT_FILE" 2>&1 || true
 
 if [[ -f "$METRICS_FILE" ]]; then
     log "Metrics file contents:"
@@ -172,11 +189,11 @@ rm -f "$RESUME_TOKEN_FILE"
 start_server
 
 log "First connection (full TLS handshake)..."
-output1=$(env -u ZELLIJ_REMOTE_TOKEN \
+env -u ZELLIJ_REMOTE_TOKEN \
     SERVER_URL="https://127.0.0.1:$PORT" \
     ZELLIJ_REMOTE_TOKEN="$TEST_TOKEN" \
     HEADLESS=1 \
-    timeout 8 "$SPIKE_CLIENT" --metrics-out "$METRICS_FILE" 2>&1) || true
+    timeout 8 "$SPIKE_CLIENT" --metrics-out "$METRICS_FILE" 2>&1 || true
 
 FIRST_CONNECT_MS=0
 if [[ -f "$METRICS_FILE" ]]; then
