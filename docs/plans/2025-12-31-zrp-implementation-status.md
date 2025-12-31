@@ -18,7 +18,8 @@ The Zellij Remote Protocol (ZRP) enables Mosh-style remote terminal access over 
 | Phase 4 | Controller Lease | ✅ Complete |
 | Phase 5 | Input Handling | ✅ Complete |
 | Phase 6 | Client-side Prediction | ✅ Complete |
-| Phase 7 | Mobile Client Library | 🔲 Not Started |
+| Phase 7 | Zellij Integration | ✅ Complete |
+| Phase 8 | Mobile Client Library | 🔲 Not Started |
 
 ## Crate Structure
 
@@ -179,18 +180,23 @@ apt-get install protobuf-compiler  # For prost-build
 
 ## Next Steps
 
-### Immediate (High Value)
+### Phase 7: Zellij Integration (Planned)
 
-#### 1. Zellij Integration
-Connect to real Zellij sessions:
-- Hook into existing render pipeline output
-- Parse ANSI sequences into FrameStore
-- Route input events to PTY
-- Attach to existing sessions by name
+See [2024-12-31-zrp-zellij-integration.md](./2024-12-31-zrp-zellij-integration.md) for detailed plan.
 
-### Future
+Key integration points:
+- **Thread Bus**: Add feature-gated `to_remote` sender for remote instructions
+- **Screen Render Hook**: Capture Grid data after tab render, before ANSI serialization
+- **Input Routing**: Translate ZRP InputEvent → Zellij Action → existing route_action path
+- **Remote Thread**: Spawn WebTransport server as additional thread during session init
 
-#### 2. Mobile Client Library (Phase 7)
+Design principles:
+- All changes behind `#[cfg(feature = "remote")]`
+- Minimal intrusion (~70 lines in core files)
+- Remote acts as additional transport, not replacement
+
+### Phase 8: Mobile Client Library (Future)
+
 UniFFI bindings for iOS/Android:
 - Swift/Kotlin wrappers
 - Native UI rendering
