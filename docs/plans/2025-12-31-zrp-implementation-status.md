@@ -44,7 +44,7 @@ zellij-remote-core/       # State management
     ├── client_state.rs   # ClientRenderState (per-client baselines)
     ├── lease.rs          # LeaseManager (controller lease state machine)
     ├── input.rs          # InputReceiver/InputSender (reliable input)
-    ├── rtt.rs            # RttEstimator (EWMA RTT estimation)
+    ├── rtt.rs            # RttEstimator (adaptive RTT with link-quality-aware floors)
     ├── prediction.rs     # PredictionEngine (local echo, reconciliation)
     ├── session.rs        # RemoteSession (aggregates all state)
     └── tests/            # 134 tests including proptest
@@ -88,7 +88,7 @@ zellij-remote-tests/      # E2E testing infrastructure
 - **Backpressure**: Window tracking, ack handling, snapshot forcing
 - **Lease**: State machine transitions, policies, viewer mode
 - **Input**: Sequencing, deduplication, controller gating
-- **RTT**: EWMA smoothing, RTO calculation
+- **RTT**: Adaptive estimation, link state detection, dynamic RTO floors
 - **Prediction**: Local echo, ack reconciliation, misprediction correction
 - **Session**: Multi-client, baseline advancement
 - **Framing**: Partial reads, multiple frames, corruption handling
@@ -427,6 +427,54 @@ Enhanced authentication flow for better security and usability:
 - Token precedence: `--token` > `--token-file` > `ZELLIJ_REMOTE_TOKEN`
 - Clear error message on auth failure: "Check your --token, --token-file, or ZELLIJ_REMOTE_TOKEN"
 - Handles `ProtocolError` messages from server
+
+## Adaptive RTT Estimation (2025-01-01)
+
+Implemented link-quality-aware RTT estimation for Mosh-like responsiveness.
+
+### Design
+
+The `RttEstimator` now classifies link quality into three states based on variance ratio and loss rate:
+
+| State | Variance Ratio | Loss Rate | RTO Floor |
+|-------|---------------|-----------|-----------|
+| Stable | < 0.20 | < 1.5% | 50ms |
+| Normal | 0.20 - 0.50 | 1.5% - 6% | 100ms |
+| Degraded | > 0.50 | > 6% | 200ms |
+
+### Key Features
+
+- **Dynamic RTO floors**: Lower floor (50ms) on stable links for responsiveness; higher floor (200ms) on degraded links to avoid spurious retransmits
+- **Time-based hysteresis**: Prevents oscillation between states
+  - Enter Stable: 1000ms of stable metrics
+  - Enter Degraded: 500ms of degraded metrics  
+  - Recover from Degraded: 2000ms of improved metrics
+- **Fast convergence**: Uses α=0.25 (vs normal 0.125) when RTT improves significantly
+- **Sliding window loss tracking**: 128-packet window for loss rate calculation
+
+### API
+
+```rust
+// Record packet outcomes
+estimator.record_sample(rtt_ms);  // Delivered packet with RTT
+estimator.record_loss();           // Lost packet
+
+// Query state
+estimator.link_state();     // LinkState::Stable/Normal/Degraded
+estimator.adaptive_floor(); // Current RTO floor in ms
+estimator.rto_ms();         // Computed RTO (clamped to floor)
+estimator.loss_rate();      // Current loss rate (0.0 - 1.0)
+estimator.variance_ratio(); // rttvar / srtt
+```
+
+### Test Coverage
+
+27 tests covering:
+- State transitions and hysteresis
+- Loss rate calculation (bounded to 1.0)
+- Window boundary behavior
+- Fast convergence on improvement
+- Zero/low RTT handling
 
 ## Next Steps
 

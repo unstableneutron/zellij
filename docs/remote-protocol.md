@@ -95,7 +95,7 @@ Key components:
 - `LeaseManager` - Controller lease state machine
 - `RenderWindow` - Backpressure/flow control
 - `InputReceiver/InputSender` - Reliable input handling
-- `RttEstimator` - RTT estimation for latency tracking
+- `RttEstimator` - Adaptive RTT estimation with link-quality-aware RTO floors
 - `PredictionEngine` - Client-side local echo with reconciliation
 
 ### zellij-remote-bridge
@@ -231,7 +231,7 @@ See [docs/plans/2024-12-31-zrp-implementation-status.md](plans/2024-12-31-zrp-im
 - ✅ Backpressure & flow control
 - ✅ Controller lease
 - ✅ Input handling with acknowledgment
-- ✅ RTT estimation
+- ✅ Adaptive RTT estimation (link-quality-aware floors: 50/100/200ms)
 - ✅ Resume tokens
 - ✅ Client-side prediction
 - ✅ Zellij integration (Phase 7 + 7.5)
