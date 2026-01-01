@@ -63,7 +63,8 @@ pub fn chunks_to_frame_store(
 
             let adjusted_styles =
                 apply_selection_styling(&selection_and_colors, *tc.styles, chunk_y, col);
-            let cell = character_styles_to_cell(tc.character, tc.width(), &adjusted_styles, style_table);
+            let cell =
+                character_styles_to_cell(tc.character, tc.width(), &adjusted_styles, style_table);
             let width = tc.width();
 
             store.update_row(chunk_y, |row| {
@@ -120,10 +121,7 @@ mod tests {
     #[test]
     fn test_multiple_characters_in_chunk() {
         let mut style_table = StyleTable::new();
-        let chars: Vec<TerminalCharacter> = "Hello"
-            .chars()
-            .map(TerminalCharacter::new)
-            .collect();
+        let chars: Vec<TerminalCharacter> = "Hello".chars().map(TerminalCharacter::new).collect();
         let chunk = CharacterChunk::new(chars, 10, 5);
 
         let store = chunks_to_frame_store(&[chunk], 80, 24, &mut style_table);
@@ -158,10 +156,7 @@ mod tests {
     #[test]
     fn test_chunk_at_right_edge() {
         let mut style_table = StyleTable::new();
-        let chars: Vec<TerminalCharacter> = "Test"
-            .chars()
-            .map(TerminalCharacter::new)
-            .collect();
+        let chars: Vec<TerminalCharacter> = "Test".chars().map(TerminalCharacter::new).collect();
         let chunk = CharacterChunk::new(chars, 78, 0);
 
         let store = chunks_to_frame_store(&[chunk], 80, 24, &mut style_table);
@@ -185,21 +180,9 @@ mod tests {
     #[test]
     fn test_multiple_chunks() {
         let mut style_table = StyleTable::new();
-        let chunk1 = CharacterChunk::new(
-            vec![TerminalCharacter::new('A')],
-            0,
-            0,
-        );
-        let chunk2 = CharacterChunk::new(
-            vec![TerminalCharacter::new('B')],
-            10,
-            5,
-        );
-        let chunk3 = CharacterChunk::new(
-            vec![TerminalCharacter::new('C')],
-            20,
-            10,
-        );
+        let chunk1 = CharacterChunk::new(vec![TerminalCharacter::new('A')], 0, 0);
+        let chunk2 = CharacterChunk::new(vec![TerminalCharacter::new('B')], 10, 5);
+        let chunk3 = CharacterChunk::new(vec![TerminalCharacter::new('C')], 20, 10);
 
         let store = chunks_to_frame_store(&[chunk1, chunk2, chunk3], 80, 24, &mut style_table);
 
@@ -212,16 +195,8 @@ mod tests {
     #[test]
     fn test_overlapping_chunks() {
         let mut style_table = StyleTable::new();
-        let chunk1 = CharacterChunk::new(
-            vec![TerminalCharacter::new('X')],
-            5,
-            3,
-        );
-        let chunk2 = CharacterChunk::new(
-            vec![TerminalCharacter::new('Y')],
-            5,
-            3,
-        );
+        let chunk1 = CharacterChunk::new(vec![TerminalCharacter::new('X')], 5, 3);
+        let chunk2 = CharacterChunk::new(vec![TerminalCharacter::new('Y')], 5, 3);
 
         let store = chunks_to_frame_store(&[chunk1, chunk2], 80, 24, &mut style_table);
 

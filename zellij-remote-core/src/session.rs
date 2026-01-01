@@ -230,8 +230,11 @@ impl RemoteSession {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        if !token.is_valid_timestamp(self.token_expiry_ms, current_time_ms, self.max_clock_skew_ms)
-        {
+        if !token.is_valid_timestamp(
+            self.token_expiry_ms,
+            current_time_ms,
+            self.max_clock_skew_ms,
+        ) {
             if token.issued_at_ms > current_time_ms + self.max_clock_skew_ms {
                 return ResumeResult::FutureDatedToken;
             }
@@ -255,8 +258,10 @@ impl RemoteSession {
 
         self.clients
             .insert(token.client_id, ClientRenderState::new(window_size));
-        self.input_receivers
-            .insert(token.client_id, InputReceiver::new_from_seq(token.last_acked_input_seq));
+        self.input_receivers.insert(
+            token.client_id,
+            InputReceiver::new_from_seq(token.last_acked_input_seq),
+        );
 
         if let Some(baseline_frame) = self.state_history.get(token.last_applied_state_id) {
             if let Some(client_state) = self.clients.get_mut(&token.client_id) {

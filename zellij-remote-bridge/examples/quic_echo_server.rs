@@ -52,12 +52,12 @@ async fn handle_connection(connection: wtransport::Connection) -> Result<()> {
             None => {
                 log::info!("Stream closed after {} messages", message_count);
                 break;
-            }
+            },
         };
 
         message_count += 1;
         let received = &buf[..n];
-        
+
         if received.starts_with(b"PING:") {
             log::debug!("Echo {} bytes (msg #{})", n, message_count);
             send.write_all(received).await?;

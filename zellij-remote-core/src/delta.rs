@@ -24,7 +24,8 @@ impl DeltaEngine {
         // Collect candidate rows: dirty_rows if provided, else fall back to all rows
         let mut candidate_rows: Vec<usize> = if let Some(dirty) = dirty_rows {
             // Only consider rows marked dirty (filtered to valid range)
-            dirty.iter()
+            dirty
+                .iter()
                 .filter(|&idx| *idx < current.rows.len())
                 .copied()
                 .collect()
@@ -34,7 +35,7 @@ impl DeltaEngine {
                 .filter(|&idx| !Arc::ptr_eq(&baseline.rows[idx].0, &current.rows[idx].0))
                 .collect()
         };
-        
+
         // Sort for deterministic ordering (HashSet iteration is nondeterministic)
         candidate_rows.sort_unstable();
 
@@ -42,7 +43,7 @@ impl DeltaEngine {
         for row_idx in candidate_rows {
             let baseline_row = baseline.rows.get(row_idx);
             let current_row = &current.rows[row_idx];
-            
+
             if let Some(patch) = Self::encode_row_patch(row_idx, baseline_row, current_row) {
                 row_patches.push(patch);
             }
@@ -122,24 +123,24 @@ impl DeltaEngine {
     fn encode_row_patch(row_idx: usize, baseline: Option<&Row>, current: &Row) -> Option<RowPatch> {
         let cols = current.cols();
         let mut runs: Vec<CellRun> = Vec::new();
-        
+
         let mut col = 0;
         while col < cols {
             // Find start of changed region
             while col < cols && !Self::cell_changed(baseline, current, col) {
                 col += 1;
             }
-            
+
             if col >= cols {
                 break;
             }
-            
+
             // Found a changed cell - find the extent of the changed region
             let start_col = col;
             let mut codepoints = Vec::new();
             let mut widths = Vec::new();
             let mut style_ids = Vec::new();
-            
+
             while col < cols && Self::cell_changed(baseline, current, col) {
                 if let Some(cell) = current.get_cell(col) {
                     codepoints.push(cell.codepoint);
@@ -148,7 +149,7 @@ impl DeltaEngine {
                 }
                 col += 1;
             }
-            
+
             if !codepoints.is_empty() {
                 runs.push(CellRun {
                     col_start: start_col as u32,
@@ -158,7 +159,7 @@ impl DeltaEngine {
                 });
             }
         }
-        
+
         if runs.is_empty() {
             None
         } else {
@@ -180,12 +181,12 @@ impl DeltaEngine {
                         base.codepoint != curr.codepoint
                             || base.width != curr.width
                             || base.style_id != curr.style_id
-                    }
+                    },
                     (None, Some(_)) => true, // New column
                     (Some(_), None) => true, // Deleted column
                     (None, None) => false,
                 }
-            }
+            },
         }
     }
 

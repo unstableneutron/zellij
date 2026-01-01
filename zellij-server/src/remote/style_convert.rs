@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::panes::terminal_character::NamedColor;
 use crate::panes::terminal_character::{
     AnsiCode, AnsiStyledUnderline, CharacterStyles, RcCharacterStyles, TerminalCharacter,
 };
-use crate::panes::terminal_character::NamedColor;
 use zellij_remote_core::{Cell, StyleTable};
 use zellij_remote_protocol::{color, Color, DefaultColor, Rgb, Style, UnderlineStyle};
 

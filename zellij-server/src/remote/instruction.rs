@@ -12,19 +12,11 @@ pub enum RemoteInstruction {
         style_table: StyleTable,
     },
     /// Client resized their viewport
-    ClientResize {
-        client_id: ClientId,
-        size: Size,
-    },
+    ClientResize { client_id: ClientId, size: Size },
     /// Remote client connected
-    ClientConnected {
-        client_id: ClientId,
-        size: Size,
-    },
+    ClientConnected { client_id: ClientId, size: Size },
     /// Remote client disconnected
-    ClientDisconnected {
-        client_id: ClientId,
-    },
+    ClientDisconnected { client_id: ClientId },
     /// Session is shutting down
     Shutdown,
 }
@@ -33,10 +25,7 @@ pub enum RemoteInstruction {
 #[derive(Debug, Clone)]
 pub enum RemoteInputInstruction {
     /// Remote client sent keyboard input
-    Key {
-        client_id: ClientId,
-        key: Vec<u8>,
-    },
+    Key { client_id: ClientId, key: Vec<u8> },
     /// Remote client sent mouse event
     Mouse {
         client_id: ClientId,

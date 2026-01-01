@@ -176,13 +176,7 @@ fn test_resume_with_valid_token() {
     assert!(!session.has_client(1));
 
     let result = session.try_resume(&token_bytes, 4);
-    assert!(matches!(
-        result,
-        ResumeResult::Resumed {
-            client_id: 1,
-            ..
-        }
-    ));
+    assert!(matches!(result, ResumeResult::Resumed { client_id: 1, .. }));
     assert!(session.has_client(1));
 }
 
@@ -262,7 +256,10 @@ fn test_resumed_client_gets_delta_not_snapshot() {
     assert!(matches!(result, ResumeResult::Resumed { .. }));
 
     let update = session.get_render_update(1);
-    assert!(matches!(update, Some(crate::session::RenderUpdate::Delta(_))));
+    assert!(matches!(
+        update,
+        Some(crate::session::RenderUpdate::Delta(_))
+    ));
 }
 
 #[test]

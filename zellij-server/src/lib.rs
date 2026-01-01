@@ -1229,7 +1229,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 #[cfg(feature = "remote")]
                 {
                     if let Some(session_data) = session_data.write().unwrap().as_ref() {
-                        let _ = session_data.senders.send_to_remote(RemoteInstruction::Shutdown);
+                        let _ = session_data
+                            .senders
+                            .send_to_remote(RemoteInstruction::Shutdown);
                     }
                 }
 
@@ -1932,7 +1934,9 @@ fn init_session(
             .ok()
             .map(|s| {
                 if s.is_empty() {
-                    log::error!("ZELLIJ_REMOTE_TOKEN cannot be empty, treating as no authentication");
+                    log::error!(
+                        "ZELLIJ_REMOTE_TOKEN cannot be empty, treating as no authentication"
+                    );
                     None
                 } else {
                     Some(s.into_bytes())

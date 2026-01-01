@@ -6,15 +6,15 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use prost::Message;
+use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, RwLock};
 use wtransport::{Endpoint, Identity, ServerConfig};
 use zellij_remote_bridge::{decode_datagram_envelope, encode_datagram_envelope, encode_envelope};
 use zellij_remote_core::{FrameStore, LeaseResult, RenderUpdate};
-use subtle::ConstantTimeEq;
 use zellij_remote_protocol::{
-    datagram_envelope, protocol_error, stream_envelope, Capabilities, ClientHello,
-    ControllerLease, DatagramEnvelope, DenyControl, DisplaySize, GrantControl, ProtocolError,
-    ProtocolVersion, ServerHello, SessionState, StreamEnvelope,
+    datagram_envelope, protocol_error, stream_envelope, Capabilities, ClientHello, ControllerLease,
+    DatagramEnvelope, DenyControl, DisplaySize, GrantControl, ProtocolError, ProtocolVersion,
+    ServerHello, SessionState, StreamEnvelope,
 };
 use zellij_utils::channels::{Receiver, SenderWithContext};
 use zellij_utils::errors::ErrorContext;
@@ -84,10 +84,7 @@ impl TestKnobs {
         if self.log_frame_stats {
             active.push("LOG_FRAME_STATS=1".to_string());
         }
-        log::warn!(
-            "Remote server test knobs active: {}",
-            active.join(", ")
-        );
+        log::warn!("Remote server test knobs active: {}", active.join(", "));
     }
 }
 
@@ -109,7 +106,10 @@ impl std::fmt::Debug for RemoteConfig {
             .field("listen_addr", &self.listen_addr)
             .field("session_name", &self.session_name)
             .field("initial_size", &self.initial_size)
-            .field("bearer_token", &self.bearer_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -246,25 +246,27 @@ async fn run_remote_server(
     log::info!(
         "WebTransport server listening on {}{}",
         config.listen_addr,
-        if bearer_token.is_some() { " (authenticated)" } else { " (UNAUTHENTICATED)" }
+        if bearer_token.is_some() {
+            " (authenticated)"
+        } else {
+            " (UNAUTHENTICATED)"
+        }
     );
 
     // M3: Spawn a dedicated task for blocking recv instead of spawning per-receive
     let (instruction_tx, mut instruction_rx) = mpsc::channel::<RemoteInstruction>(64);
     tokio::task::spawn_blocking({
         let receiver = receiver.clone();
-        move || {
-            loop {
-                match receiver.recv() {
-                    Ok((instruction, _err_ctx)) => {
-                        if instruction_tx.blocking_send(instruction).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => {
+        move || loop {
+            match receiver.recv() {
+                Ok((instruction, _err_ctx)) => {
+                    if instruction_tx.blocking_send(instruction).is_err() {
                         break;
                     }
-                }
+                },
+                Err(_) => {
+                    break;
+                },
             }
         }
     });
@@ -335,27 +337,27 @@ async fn handle_instruction(
                 let incoming_cols = frame_store.current_frame().cols;
                 let incoming_rows = frame_store.current_frame().rows.len();
                 let incoming_cursor = frame_store.current_frame().cursor;
-                
+
                 // Take dirty_rows before borrowing session
                 let dirty_rows = frame_store.take_dirty_rows();
-                
+
                 let session = state.manager.session_mut();
-                
+
                 // Check for dimension changes - requires full redraw
                 let session_cols = session.frame_store.current_frame().cols;
                 let session_rows = session.frame_store.current_frame().rows.len();
-                let dimension_changed = session_cols != incoming_cols 
-                    || session_rows != incoming_rows;
-                
+                let dimension_changed =
+                    session_cols != incoming_cols || session_rows != incoming_rows;
+
                 // Determine if we need full copy:
                 // 1. First frame - need complete initial state
                 // 2. Dimension changed - resize invalidates all rows
                 let needs_full_copy = is_first_frame || dimension_changed;
-                
+
                 if dimension_changed {
                     session.frame_store.resize(incoming_cols, incoming_rows);
                 }
-                
+
                 if needs_full_copy {
                     // Copy all rows for initial frame or after resize
                     for (row_idx, row) in frame_store.current_frame().rows.iter().enumerate() {
@@ -365,23 +367,25 @@ async fn handle_instruction(
                     // Normal case: only copy dirty rows (the optimization!)
                     for row_idx in &dirty_rows {
                         if let Some(row) = frame_store.current_frame().rows.get(*row_idx) {
-                            session.frame_store.set_row(*row_idx, row.0.as_ref().clone());
+                            session
+                                .frame_store
+                                .set_row(*row_idx, row.0.as_ref().clone());
                         }
                     }
                 }
                 // If dirty_rows is empty and not first frame/resize, only cursor updates
                 // (no row copying needed - this is a cursor-only frame)
-                
+
                 session.frame_store.set_cursor(incoming_cursor);
                 session.frame_store.advance_state();
                 session.record_state_snapshot();
                 session.clear_dirty_rows_cache();
-                
+
                 let _state_id = session.frame_store.current_state_id();
-                
+
                 // Release session borrow before assigning to state
                 let _ = session;
-                
+
                 // Store for debugging
                 state.current_frame = Some(frame_store);
 
@@ -399,16 +403,20 @@ async fn handle_instruction(
                 let updates: Vec<_> = clients
                     .keys()
                     .filter_map(|&remote_id| {
-                        state.manager.session_mut().get_render_update(remote_id).map(|update| {
-                            let frame_size = match &update {
-                                RenderUpdate::Snapshot(snapshot) => snapshot.encoded_len(),
-                                RenderUpdate::Delta(delta) => {
-                                    state.delta_count = state.delta_count.wrapping_add(1);
-                                    delta.encoded_len()
-                                },
-                            };
-                            (remote_id, update, frame_size)
-                        })
+                        state
+                            .manager
+                            .session_mut()
+                            .get_render_update(remote_id)
+                            .map(|update| {
+                                let frame_size = match &update {
+                                    RenderUpdate::Snapshot(snapshot) => snapshot.encoded_len(),
+                                    RenderUpdate::Delta(delta) => {
+                                        state.delta_count = state.delta_count.wrapping_add(1);
+                                        delta.encoded_len()
+                                    },
+                                };
+                                (remote_id, update, frame_size)
+                            })
                     })
                     .collect();
 
@@ -432,18 +440,22 @@ async fn handle_instruction(
                 let is_delta = matches!(&update, RenderUpdate::Delta(_));
 
                 let should_drop = if is_delta {
-                    knobs.drop_delta_nth.map(|n| {
-                        if n > 0 {
-                            let mut state_guard = shared_state.blocking_write();
-                            let should_drop = state_guard.delta_count.is_multiple_of(n);
-                            if should_drop {
-                                state_guard.dropped_delta_count = state_guard.dropped_delta_count.wrapping_add(1);
+                    knobs
+                        .drop_delta_nth
+                        .map(|n| {
+                            if n > 0 {
+                                let mut state_guard = shared_state.blocking_write();
+                                let should_drop = state_guard.delta_count.is_multiple_of(n);
+                                if should_drop {
+                                    state_guard.dropped_delta_count =
+                                        state_guard.dropped_delta_count.wrapping_add(1);
+                                }
+                                should_drop
+                            } else {
+                                false
                             }
-                            should_drop
-                        } else {
-                            false
-                        }
-                    }).unwrap_or(false)
+                        })
+                        .unwrap_or(false)
                 } else {
                     false
                 };
@@ -529,7 +541,10 @@ async fn handle_instruction(
 
             for remote_id in &clients_need_snapshot {
                 let mut state = shared_state.write().await;
-                state.manager.session_mut().force_client_snapshot(*remote_id);
+                state
+                    .manager
+                    .session_mut()
+                    .force_client_snapshot(*remote_id);
             }
 
             for remote_id in clients_to_remove {
@@ -540,7 +555,7 @@ async fn handle_instruction(
             }
 
             log::trace!("Frame ready: clients={}", clients.len());
-        }
+        },
         RemoteInstruction::ClientResize { client_id, size } => {
             // Don't resize frame_store here - let FrameReady detect dimension changes
             // and perform full copy. Resizing here before FrameReady arrives would
@@ -551,22 +566,27 @@ async fn handle_instruction(
                 size.cols,
                 size.rows
             );
-        }
+        },
         RemoteInstruction::ClientConnected { client_id, size } => {
             let mut state = shared_state.write().await;
             state.active_zellij_client = Some(client_id);
-            log::info!("Zellij client {} connected: {}x{}", client_id, size.cols, size.rows);
-        }
+            log::info!(
+                "Zellij client {} connected: {}x{}",
+                client_id,
+                size.cols,
+                size.rows
+            );
+        },
         RemoteInstruction::ClientDisconnected { client_id } => {
             let mut state = shared_state.write().await;
             if state.active_zellij_client == Some(client_id) {
                 state.active_zellij_client = None;
             }
             log::info!("Zellij client {} disconnected", client_id);
-        }
+        },
         RemoteInstruction::Shutdown => {
             return Ok(true);
-        }
+        },
     }
     Ok(false)
 }
@@ -611,8 +631,14 @@ impl Drop for ClientGuard {
                 state.manager.session_mut().remove_client(remote_id);
                 log::info!("ClientGuard cleanup: removed client {}", remote_id);
             }
-            if let Err(e) = conn_event_tx.send(ConnectionEvent::ClientDisconnected { remote_id }).await {
-                log::warn!("Failed to send ClientDisconnected during guard cleanup: {}", e);
+            if let Err(e) = conn_event_tx
+                .send(ConnectionEvent::ClientDisconnected { remote_id })
+                .await
+            {
+                log::warn!(
+                    "Failed to send ClientDisconnected during guard cleanup: {}",
+                    e
+                );
             }
         });
     }
@@ -679,14 +705,22 @@ async fn handle_connection(
         let resume_token = session.generate_resume_token(remote_id);
         let session_name = state.session_name.clone();
 
-        let server_hello = build_server_hello(&client_hello, remote_id, lease_info, resume_token, &session_name);
+        let server_hello = build_server_hello(
+            &client_hello,
+            remote_id,
+            lease_info,
+            resume_token,
+            &session_name,
+        );
         let encoded = encode_envelope(&StreamEnvelope {
             msg: Some(stream_envelope::Msg::ServerHello(server_hello)),
         })?;
         send.write_all(&encoded).await?;
         log::info!("Sent ServerHello to remote client {}", remote_id);
 
-        if let Some(RenderUpdate::Snapshot(snapshot)) = state.manager.session_mut().get_render_update(remote_id) {
+        if let Some(RenderUpdate::Snapshot(snapshot)) =
+            state.manager.session_mut().get_render_update(remote_id)
+        {
             let encoded = encode_envelope(&StreamEnvelope {
                 msg: Some(stream_envelope::Msg::ScreenSnapshot(snapshot)),
             })?;
@@ -703,13 +737,15 @@ async fn handle_connection(
         .map(|c| c.supports_datagrams)
         .unwrap_or(false);
 
-    conn_event_tx.send(ConnectionEvent::ClientConnected {
-        remote_id,
-        send,
-        connection: connection.clone(),
-        client_supports_datagrams,
-        conn_event_tx: conn_event_tx.clone(),
-    }).await?;
+    conn_event_tx
+        .send(ConnectionEvent::ClientConnected {
+            remote_id,
+            send,
+            connection: connection.clone(),
+            client_supports_datagrams,
+            conn_event_tx: conn_event_tx.clone(),
+        })
+        .await?;
 
     let mut buffer = BytesMut::new();
     loop {
@@ -718,24 +754,25 @@ async fn handle_connection(
             Some(0) | None => {
                 log::info!("Remote client {} stream closed", remote_id);
                 break;
-            }
+            },
             Some(n) => {
                 buffer.extend_from_slice(&chunk[..n]);
 
                 while let Some(envelope) = decode_envelope(&mut buffer)? {
                     match envelope.msg {
                         Some(stream_envelope::Msg::InputEvent(input)) => {
-                            conn_event_tx.send(ConnectionEvent::InputReceived {
-                                remote_id,
-                                input,
-                            }).await?;
-                        }
+                            conn_event_tx
+                                .send(ConnectionEvent::InputReceived { remote_id, input })
+                                .await?;
+                        },
                         Some(stream_envelope::Msg::RequestControl(req)) => {
-                            conn_event_tx.send(ConnectionEvent::RequestControl {
-                                remote_id,
-                                request: req,
-                            }).await?;
-                        }
+                            conn_event_tx
+                                .send(ConnectionEvent::RequestControl {
+                                    remote_id,
+                                    request: req,
+                                })
+                                .await?;
+                        },
                         Some(stream_envelope::Msg::RequestSnapshot(request)) => {
                             log::info!(
                                 "Client {} requested snapshot: reason={:?}",
@@ -745,7 +782,7 @@ async fn handle_connection(
                             conn_event_tx
                                 .send(ConnectionEvent::RequestSnapshot { remote_id, request })
                                 .await?;
-                        }
+                        },
                         Some(stream_envelope::Msg::SetControllerSize(request)) => {
                             log::info!(
                                 "Client {} set controller size: {:?}",
@@ -755,18 +792,20 @@ async fn handle_connection(
                             conn_event_tx
                                 .send(ConnectionEvent::SetControllerSize { remote_id, request })
                                 .await?;
-                        }
+                        },
 
                         _ => {
                             log::debug!("Unhandled message from client {}", remote_id);
-                        }
+                        },
                     }
                 }
-            }
+            },
         }
     }
 
-    conn_event_tx.send(ConnectionEvent::ClientDisconnected { remote_id }).await?;
+    conn_event_tx
+        .send(ConnectionEvent::ClientDisconnected { remote_id })
+        .await?;
     Ok(())
 }
 
@@ -784,10 +823,10 @@ fn spawn_client_sender_task(
                         log::warn!("Client {} sender task: write failed: {}", remote_id, e);
                         break;
                     }
-                }
+                },
                 Err(e) => {
                     log::error!("Client {} sender task: encode failed: {}", remote_id, e);
-                }
+                },
             }
         }
         log::debug!("Client {} sender task exiting", remote_id);
@@ -802,32 +841,29 @@ fn spawn_datagram_receive_task(
     tokio::spawn(async move {
         loop {
             match connection.receive_datagram().await {
-                Ok(datagram) => {
-                    match decode_datagram_envelope(&datagram) {
-                        Ok(envelope) => {
-                            if let Some(datagram_envelope::Msg::StateAck(ack)) = envelope.msg {
-                                log::trace!(
-                                    "Received StateAck from client {}: last_applied={}",
+                Ok(datagram) => match decode_datagram_envelope(&datagram) {
+                    Ok(envelope) => {
+                        if let Some(datagram_envelope::Msg::StateAck(ack)) = envelope.msg {
+                            log::trace!(
+                                "Received StateAck from client {}: last_applied={}",
+                                remote_id,
+                                ack.last_applied_state_id
+                            );
+                            if conn_event_tx
+                                .try_send(ConnectionEvent::StateAckReceived { remote_id, ack })
+                                .is_err()
+                            {
+                                log::debug!(
+                                    "Client {} StateAck channel full or closed, dropping ack",
                                     remote_id,
-                                    ack.last_applied_state_id
                                 );
-                                if conn_event_tx.try_send(ConnectionEvent::StateAckReceived { remote_id, ack }).is_err() {
-                                    log::debug!(
-                                        "Client {} StateAck channel full or closed, dropping ack",
-                                        remote_id,
-                                    );
-                                }
                             }
                         }
-                        Err(e) => {
-                            log::trace!(
-                                "Failed to decode datagram from client {}: {}",
-                                remote_id,
-                                e
-                            );
-                        }
-                    }
-                }
+                    },
+                    Err(e) => {
+                        log::trace!("Failed to decode datagram from client {}: {}", remote_id, e);
+                    },
+                },
                 Err(e) => {
                     log::debug!(
                         "Datagram receive error for client {} (connection closed?): {}",
@@ -835,7 +871,7 @@ fn spawn_datagram_receive_task(
                         e
                     );
                     break;
-                }
+                },
             }
         }
         log::debug!("Client {} datagram receive task exiting", remote_id);
@@ -848,7 +884,13 @@ async fn handle_connection_event(
     event: ConnectionEvent,
 ) -> Result<()> {
     match event {
-        ConnectionEvent::ClientConnected { remote_id, send, connection, client_supports_datagrams, conn_event_tx } => {
+        ConnectionEvent::ClientConnected {
+            remote_id,
+            send,
+            connection,
+            client_supports_datagrams,
+            conn_event_tx,
+        } => {
             let max_datagram_size = connection.max_datagram_size();
             let transport_supports = max_datagram_size.is_some();
             let datagrams_negotiated = transport_supports && client_supports_datagrams;
@@ -869,7 +911,11 @@ async fn handle_connection_event(
             }
 
             let datagram_task_handle = if datagrams_negotiated {
-                Some(spawn_datagram_receive_task(remote_id, connection.clone(), conn_event_tx))
+                Some(spawn_datagram_receive_task(
+                    remote_id,
+                    connection.clone(),
+                    conn_event_tx,
+                ))
             } else {
                 None
             };
@@ -887,8 +933,12 @@ async fn handle_connection_event(
                     datagram_task_handle,
                 },
             );
-            log::info!("Remote client {} added to active clients (total: {})", remote_id, clients.len());
-        }
+            log::info!(
+                "Remote client {} added to active clients (total: {})",
+                remote_id,
+                clients.len()
+            );
+        },
         ConnectionEvent::ClientDisconnected { remote_id } => {
             if let Some(client) = clients.remove(&remote_id) {
                 if let Some(handle) = client.datagram_task_handle {
@@ -897,18 +947,31 @@ async fn handle_connection_event(
             }
             let mut state = shared_state.write().await;
             state.manager.session_mut().remove_client(remote_id);
-            log::info!("Remote client {} removed (total: {})", remote_id, clients.len());
-        }
+            log::info!(
+                "Remote client {} removed (total: {})",
+                remote_id,
+                clients.len()
+            );
+        },
         ConnectionEvent::InputReceived { remote_id, input } => {
             // M2: Clone data needed, release lock before network I/O
             let (is_controller, process_result, active_zellij_client, to_screen) = {
                 let mut state = shared_state.write().await;
-                let is_controller = state.manager.session_mut().lease_manager.is_controller(remote_id);
+                let is_controller = state
+                    .manager
+                    .session_mut()
+                    .lease_manager
+                    .is_controller(remote_id);
                 if !is_controller {
                     (false, None, None, None)
                 } else {
                     let result = state.manager.session_mut().process_input(remote_id, &input);
-                    (true, Some(result), state.active_zellij_client, Some(state.to_screen.clone()))
+                    (
+                        true,
+                        Some(result),
+                        state.active_zellij_client,
+                        Some(state.to_screen.clone()),
+                    )
                 }
             };
             // Lock released here
@@ -946,13 +1009,15 @@ async fn handle_connection_event(
                             } => {
                                 if let Some(zellij_client_id) = active_zellij_client {
                                     if let Some(ref to_screen) = to_screen {
-                                        if let Err(e) = to_screen.send(ScreenInstruction::WriteCharacter(
-                                            key_with_modifier,
-                                            bytes,
-                                            is_kitty_keyboard_protocol,
-                                            zellij_client_id,
-                                            None,
-                                        )) {
+                                        if let Err(e) =
+                                            to_screen.send(ScreenInstruction::WriteCharacter(
+                                                key_with_modifier,
+                                                bytes,
+                                                is_kitty_keyboard_protocol,
+                                                zellij_client_id,
+                                                None,
+                                            ))
+                                        {
                                             log::error!(
                                                 "Failed to send to screen thread (may have crashed): {}",
                                                 e
@@ -971,27 +1036,31 @@ async fn handle_connection_event(
                                         remote_id
                                     );
                                 }
-                            }
+                            },
                             _ => {
-                                log::debug!("Non-write action from remote client {}, ignoring", remote_id);
-                            }
+                                log::debug!(
+                                    "Non-write action from remote client {}, ignoring",
+                                    remote_id
+                                );
+                            },
                         }
                     }
                     if let Some(client) = clients.get(&remote_id) {
                         let msg = StreamEnvelope {
                             msg: Some(stream_envelope::Msg::InputAck(ack)),
                         };
-                        if let Err(mpsc::error::TrySendError::Full(_)) = client.sender.try_send(msg) {
+                        if let Err(mpsc::error::TrySendError::Full(_)) = client.sender.try_send(msg)
+                        {
                             log::warn!("Client {} channel full, dropping InputAck", remote_id);
                         }
                     }
                     log::trace!("Input from client {} processed", remote_id);
-                }
+                },
                 Err(e) => {
                     log::warn!("Input error from client {}: {:?}", remote_id, e);
-                }
+                },
             }
-        }
+        },
         ConnectionEvent::RequestControl { remote_id, request } => {
             // M2: Clone result before releasing lock
             let response = {
@@ -1005,28 +1074,34 @@ async fn handle_connection_event(
                 match result {
                     LeaseResult::Granted(lease) => {
                         log::info!("Granted control to remote client {}", remote_id);
-                        stream_envelope::Msg::GrantControl(GrantControl {
-                            lease: Some(lease),
-                        })
-                    }
-                    LeaseResult::Denied { reason, current_lease } => {
+                        stream_envelope::Msg::GrantControl(GrantControl { lease: Some(lease) })
+                    },
+                    LeaseResult::Denied {
+                        reason,
+                        current_lease,
+                    } => {
                         log::info!("Denied control to remote client {}: {}", remote_id, reason);
                         stream_envelope::Msg::DenyControl(DenyControl {
                             reason,
                             lease: current_lease,
                         })
-                    }
+                    },
                 }
             };
             // Lock released here
 
             if let Some(client) = clients.get(&remote_id) {
-                let msg = StreamEnvelope { msg: Some(response) };
+                let msg = StreamEnvelope {
+                    msg: Some(response),
+                };
                 if let Err(mpsc::error::TrySendError::Full(_)) = client.sender.try_send(msg) {
-                    log::warn!("Client {} channel full, dropping control response", remote_id);
+                    log::warn!(
+                        "Client {} channel full, dropping control response",
+                        remote_id
+                    );
                 }
             }
-        }
+        },
         ConnectionEvent::RequestSnapshot { remote_id, request } => {
             log::info!(
                 "Processing snapshot request from {}: reason={}, known_state={}",
@@ -1037,16 +1112,19 @@ async fn handle_connection_event(
 
             let mut state = shared_state.write().await;
             state.manager.session_mut().force_client_snapshot(remote_id);
-        }
+        },
         ConnectionEvent::StateAckReceived { remote_id, ack } => {
             let mut state = shared_state.write().await;
-            state.manager.session_mut().process_state_ack(remote_id, &ack);
+            state
+                .manager
+                .session_mut()
+                .process_state_ack(remote_id, &ack);
             log::trace!(
                 "Processed StateAck from client {}: last_applied={}, advancing baseline",
                 remote_id,
                 ack.last_applied_state_id
             );
-        }
+        },
         ConnectionEvent::SetControllerSize { remote_id, request } => {
             let state = shared_state.read().await;
 
@@ -1089,7 +1167,7 @@ async fn handle_connection_event(
                     rows
                 );
             }
-        }
+        },
     }
     Ok(())
 }
@@ -1109,10 +1187,10 @@ async fn read_client_hello(recv: &mut wtransport::RecvStream) -> Result<ClientHe
             match envelope.msg {
                 Some(stream_envelope::Msg::ClientHello(hello)) => {
                     return Ok(hello);
-                }
+                },
                 _ => {
                     anyhow::bail!("expected ClientHello, got other message");
-                }
+                },
             }
         }
     }
@@ -1133,7 +1211,7 @@ fn decode_envelope(buf: &mut BytesMut) -> Result<Option<StreamEnvelope>> {
                 return Ok(None);
             }
             anyhow::bail!("invalid varint in frame header");
-        }
+        },
     };
 
     if len > MAX_FRAME_SIZE {

@@ -20,10 +20,10 @@ use wtransport::{ClientConfig, Endpoint};
 
 const RESUME_TOKEN_FILE: &str = "/tmp/zellij-spike-resume-token";
 
+use zellij_remote_bridge::{decode_datagram_envelope, encode_datagram_envelope};
 use zellij_remote_core::{
     AckResult, Confidence, Cursor as CoreCursor, CursorShape, InputSender, PredictionEngine,
 };
-use zellij_remote_bridge::{decode_datagram_envelope, encode_datagram_envelope};
 use zellij_remote_protocol::{
     datagram_envelope, input_event, key_event, protocol_error, request_snapshot, stream_envelope,
     Capabilities, ClientHello, DatagramEnvelope, InputEvent, KeyEvent, KeyModifiers,
@@ -34,13 +34,21 @@ use zellij_remote_protocol::{
 #[derive(Parser, Debug)]
 #[clap(name = "spike_client", about = "Zellij remote spike client")]
 struct Args {
-    #[clap(short = 's', long, default_value = "https://127.0.0.1:4433", env = "SERVER_URL")]
+    #[clap(
+        short = 's',
+        long,
+        default_value = "https://127.0.0.1:4433",
+        env = "SERVER_URL"
+    )]
     server_url: String,
 
     #[clap(short = 't', long, env = "ZELLIJ_REMOTE_TOKEN")]
     token: Option<String>,
 
-    #[clap(long, help = "Read token from file (must have 0600 permissions on Unix)")]
+    #[clap(
+        long,
+        help = "Read token from file (must have 0600 permissions on Unix)"
+    )]
     token_file: Option<String>,
 
     #[clap(long, env = "HEADLESS")]
@@ -196,8 +204,8 @@ impl Metrics {
         if !self.rtt_samples.is_empty() {
             self.rtt_min_ms = *self.rtt_samples.iter().min().unwrap_or(&0);
             self.rtt_max_ms = *self.rtt_samples.iter().max().unwrap_or(&0);
-            self.rtt_avg_ms =
-                self.rtt_samples.iter().map(|&x| x as f64).sum::<f64>() / self.rtt_samples.len() as f64;
+            self.rtt_avg_ms = self.rtt_samples.iter().map(|&x| x as f64).sum::<f64>()
+                / self.rtt_samples.len() as f64;
         }
     }
 
@@ -317,7 +325,10 @@ fn render_screen(screen: &ScreenBuffer, pending_count: usize) -> Result<()> {
     }
 
     if screen.cursor.visible {
-        execute!(stdout, MoveTo(screen.cursor.col as u16, screen.cursor.row as u16))?;
+        execute!(
+            stdout,
+            MoveTo(screen.cursor.col as u16, screen.cursor.row as u16)
+        )?;
     }
 
     if pending_count > 0 {
@@ -837,7 +848,10 @@ async fn run_connection(
     state: &mut ClientState,
 ) -> Result<ClientResult> {
     let token = resolve_token(&state.args)?;
-    let bearer_token = token.as_ref().map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+    let bearer_token = token
+        .as_ref()
+        .map(|s| s.as_bytes().to_vec())
+        .unwrap_or_default();
 
     let resume_token = load_resume_token().unwrap_or_default();
     if !resume_token.is_empty() {
@@ -1369,18 +1383,18 @@ async fn send_input(
             if let Some(ch) = char::from_u32(codepoint) {
                 if prediction_engine.confidence(ch) != Confidence::None {
                     let overlay_cursor = if prediction_engine.pending_count() > 0 {
-                        prediction_engine.pending_predictions().last()
+                        prediction_engine
+                            .pending_predictions()
+                            .last()
                             .map(|p| p.cursor)
                             .unwrap_or(confirmed_screen.cursor)
                     } else {
                         confirmed_screen.cursor
                     };
-                    if prediction_engine.predict_char(
-                        ch,
-                        seq,
-                        &overlay_cursor,
-                        confirmed_screen.cols,
-                    ).is_some() {
+                    if prediction_engine
+                        .predict_char(ch, seq, &overlay_cursor, confirmed_screen.cols)
+                        .is_some()
+                    {
                         state.metrics.prediction_count += 1;
                         let display = confirmed_screen.clone_with_overlay(prediction_engine);
                         render_screen(&display, prediction_engine.pending_count())?;

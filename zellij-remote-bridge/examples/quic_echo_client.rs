@@ -6,7 +6,7 @@ use wtransport::{ClientConfig, Endpoint};
 // Connection migration test:
 // QUIC connections are identified by Connection IDs, not IP:port tuples.
 // This means a connection can survive network changes (WiFi → mobile).
-// 
+//
 // To test migration:
 // 1. Start echo server on a remote machine (e.g., vn3 or sjc3)
 // 2. Start this client with MIGRATION_TEST=1
@@ -22,7 +22,9 @@ struct RttStats {
 
 impl RttStats {
     fn new() -> Self {
-        Self { samples: Vec::new() }
+        Self {
+            samples: Vec::new(),
+        }
     }
 
     fn add(&mut self, rtt: Duration) {
@@ -59,7 +61,8 @@ impl RttStats {
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let server_url = env::var("SERVER_URL").unwrap_or_else(|_| "https://127.0.0.1:4433".to_string());
+    let server_url =
+        env::var("SERVER_URL").unwrap_or_else(|_| "https://127.0.0.1:4433".to_string());
     let ping_count: usize = env::var("PING_COUNT")
         .unwrap_or_else(|_| "100".to_string())
         .parse()?;
@@ -72,9 +75,15 @@ async fn main() -> Result<()> {
     let migration_test = env::var("MIGRATION_TEST").is_ok();
 
     log::info!("Connecting to {}...", server_url);
-    log::info!("Will send {} pings with {} byte payload", ping_count, payload_size);
+    log::info!(
+        "Will send {} pings with {} byte payload",
+        ping_count,
+        payload_size
+    );
     if migration_test {
-        log::info!("MIGRATION TEST MODE: Switch networks during the test to verify connection survives");
+        log::info!(
+            "MIGRATION TEST MODE: Switch networks during the test to verify connection survives"
+        );
         log::info!("The test will run slowly (1 ping/sec) to give you time to switch");
     }
 
@@ -84,9 +93,7 @@ async fn main() -> Result<()> {
         .build();
 
     let connect_start = Instant::now();
-    let connection = Endpoint::client(config)?
-        .connect(&server_url)
-        .await?;
+    let connection = Endpoint::client(config)?.connect(&server_url).await?;
     let connect_time = connect_start.elapsed();
     log::info!("Connected in {:.2}ms", connect_time.as_secs_f64() * 1000.0);
 
@@ -110,13 +117,23 @@ async fn main() -> Result<()> {
         let rtt = start.elapsed();
 
         if n != full_msg.len() || &buf[..n] != &full_msg[..] {
-            log::warn!("Mismatch at ping {}: sent {} bytes, got {} bytes", i, full_msg.len(), n);
+            log::warn!(
+                "Mismatch at ping {}: sent {} bytes, got {} bytes",
+                i,
+                full_msg.len(),
+                n
+            );
         }
 
         rtt_stats.add(rtt);
 
         if migration_test || (i + 1) % 10 == 0 || i == ping_count - 1 {
-            log::info!("Ping {}/{}: RTT = {:.2}ms", i + 1, ping_count, rtt.as_secs_f64() * 1000.0);
+            log::info!(
+                "Ping {}/{}: RTT = {:.2}ms",
+                i + 1,
+                ping_count,
+                rtt.as_secs_f64() * 1000.0
+            );
         }
 
         if migration_test {

@@ -132,7 +132,11 @@ impl PredictionEngine {
         overlay
     }
 
-    pub fn reconcile(&mut self, delivered_watermark: u64, server_cursor: &Cursor) -> ReconcileResult {
+    pub fn reconcile(
+        &mut self,
+        delivered_watermark: u64,
+        server_cursor: &Cursor,
+    ) -> ReconcileResult {
         if delivered_watermark <= self.last_confirmed_seq {
             return ReconcileResult::NoChange;
         }
@@ -155,7 +159,9 @@ impl PredictionEngine {
         }
 
         if let Some(confirmed_cursor) = last_confirmed_cursor {
-            if confirmed_cursor.col != server_cursor.col || confirmed_cursor.row != server_cursor.row {
+            if confirmed_cursor.col != server_cursor.col
+                || confirmed_cursor.row != server_cursor.row
+            {
                 self.misprediction_count += 1;
                 self.pending.clear();
 
@@ -264,7 +270,18 @@ mod tests {
         assert_eq!(pred.input_seq, 1);
         assert_eq!(pred.cursor.col, 6);
         assert_eq!(pred.cells.len(), 1);
-        assert_eq!(pred.cells[0], (5, 0, Cell { codepoint: 'a' as u32, width: 1, style_id: 0 }));
+        assert_eq!(
+            pred.cells[0],
+            (
+                5,
+                0,
+                Cell {
+                    codepoint: 'a' as u32,
+                    width: 1,
+                    style_id: 0
+                }
+            )
+        );
 
         let base = FrameData::new(80, 24);
         let overlay = engine.apply_overlay(&base);

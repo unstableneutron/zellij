@@ -1953,10 +1953,10 @@ impl Screen {
                 rows: self.size.rows,
                 cols: self.size.cols,
             };
-            let _ = self.bus.senders.send_to_remote(RemoteInstruction::ClientConnected {
-                client_id,
-                size,
-            });
+            let _ = self
+                .bus
+                .senders
+                .send_to_remote(RemoteInstruction::ClientConnected { client_id, size });
         }
 
         Ok(())
@@ -1998,9 +1998,10 @@ impl Screen {
 
         #[cfg(feature = "remote")]
         {
-            let _ = self.bus.senders.send_to_remote(RemoteInstruction::ClientDisconnected {
-                client_id,
-            });
+            let _ = self
+                .bus
+                .senders
+                .send_to_remote(RemoteInstruction::ClientDisconnected { client_id });
 
             // If another client is still connected, notify remote thread so input routing continues
             if let Some(&next_client_id) = self.connected_clients.borrow().keys().next() {
@@ -2009,10 +2010,13 @@ impl Screen {
                         rows: self.size.rows,
                         cols: self.size.cols,
                     };
-                    let _ = self.bus.senders.send_to_remote(RemoteInstruction::ClientConnected {
-                        client_id: next_client_id,
-                        size,
-                    });
+                    let _ = self
+                        .bus
+                        .senders
+                        .send_to_remote(RemoteInstruction::ClientConnected {
+                            client_id: next_client_id,
+                            size,
+                        });
                 }
             }
         }
@@ -5018,10 +5022,10 @@ pub(crate) fn screen_thread_main(
                             rows: new_size.rows,
                             cols: new_size.cols,
                         };
-                        let _ = screen.bus.senders.send_to_remote(RemoteInstruction::ClientResize {
-                            client_id,
-                            size,
-                        });
+                        let _ = screen
+                            .bus
+                            .senders
+                            .send_to_remote(RemoteInstruction::ClientResize { client_id, size });
                     }
                 }
             },
