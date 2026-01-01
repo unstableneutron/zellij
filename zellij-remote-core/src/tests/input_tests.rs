@@ -206,3 +206,19 @@ fn test_stale_ack() {
     let result = sender.process_ack(&ack);
     assert_eq!(result, AckResult::Stale);
 }
+
+#[test]
+fn test_oldest_inflight_age() {
+    let mut sender = InputSender::new(5);
+
+    // No inflight - should be None
+    assert_eq!(sender.oldest_inflight_age_ms(), None);
+
+    // Send an input
+    sender.mark_sent(1, 100);
+
+    // Should have some age (at least 0ms)
+    let age = sender.oldest_inflight_age_ms();
+    assert!(age.is_some());
+    assert!(age.unwrap() < 1000); // Should be very recent
+}

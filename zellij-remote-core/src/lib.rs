@@ -26,7 +26,7 @@ pub use lease::{LeaseEvent, LeaseManager, LeaseResult, LeaseState};
 pub use prediction::{Confidence, Prediction, PredictionEngine, ReconcileResult};
 pub use render_seq::{DatagramDecision, RenderSender, RenderSeqTracker};
 pub use resume_token::{ResumeResult, ResumeToken};
-pub use rtt::RttEstimator;
+pub use rtt::{LinkState, RttEstimator};
 pub use session::{InputError, RemoteSession, RenderUpdate};
 pub use state_history::StateHistory;
 pub use style_table::StyleTable;

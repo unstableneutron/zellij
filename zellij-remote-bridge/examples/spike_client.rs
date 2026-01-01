@@ -21,8 +21,10 @@ use wtransport::{ClientConfig, Endpoint};
 const RESUME_TOKEN_FILE: &str = "/tmp/zellij-spike-resume-token";
 
 use zellij_remote_bridge::{decode_datagram_envelope, encode_datagram_envelope};
+#[allow(unused_imports)]
 use zellij_remote_core::{
-    AckResult, Confidence, Cursor as CoreCursor, CursorShape, InputSender, PredictionEngine,
+    AckResult, Confidence, Cursor as CoreCursor, CursorShape, InputSender, LinkState,
+    PredictionEngine, RttEstimator,
 };
 use zellij_remote_protocol::{
     datagram_envelope, input_event, key_event, protocol_error, request_snapshot, stream_envelope,
@@ -197,6 +199,10 @@ struct Metrics {
     reconnect_count: u64,
     datagram_decode_errors: u64,
     errors: Vec<String>,
+    link_state: String,
+    rto_ms: u32,
+    srtt_ms: u32,
+    stall_detected: bool,
 }
 
 impl Metrics {
@@ -417,9 +423,7 @@ fn current_time_ms() -> u32 {
         .unwrap_or(0)
 }
 
-fn crossterm_key_to_proto(key: &CtKeyEvent) -> Option<InputEvent> {
-    static INPUT_SEQ: AtomicU64 = AtomicU64::new(1);
-
+fn crossterm_key_to_proto(key: &CtKeyEvent, seq: u64) -> Option<InputEvent> {
     let modifiers = KeyModifiers {
         bits: {
             let mut bits = 0u32;
@@ -525,15 +529,13 @@ fn crossterm_key_to_proto(key: &CtKeyEvent) -> Option<InputEvent> {
     };
 
     key_proto.map(|k| InputEvent {
-        input_seq: INPUT_SEQ.fetch_add(1, Ordering::Relaxed),
+        input_seq: seq,
         client_time_ms: current_time_ms(),
         payload: Some(input_event::Payload::Key(k)),
     })
 }
 
-fn parse_key_string(key_str: &str) -> Option<InputEvent> {
-    static INPUT_SEQ: AtomicU64 = AtomicU64::new(1);
-
+fn parse_key_string(key_str: &str, seq: u64) -> Option<InputEvent> {
     let parts: Vec<&str> = key_str.split('+').collect();
     let mut ctrl = false;
     let mut alt = false;
@@ -634,22 +636,20 @@ fn parse_key_string(key_str: &str) -> Option<InputEvent> {
     };
 
     Some(InputEvent {
-        input_seq: INPUT_SEQ.fetch_add(1, Ordering::Relaxed),
+        input_seq: seq,
         client_time_ms: current_time_ms(),
         payload: Some(input_event::Payload::Key(key_proto)),
     })
 }
 
-fn char_to_input_event(c: char) -> InputEvent {
-    static INPUT_SEQ: AtomicU64 = AtomicU64::new(1);
-
+fn char_to_input_event(c: char, seq: u64) -> InputEvent {
     let key_proto = KeyEvent {
         modifiers: Some(KeyModifiers { bits: 0 }),
         key: Some(key_event::Key::UnicodeScalar(c as u32)),
     };
 
     InputEvent {
-        input_seq: INPUT_SEQ.fetch_add(1, Ordering::Relaxed),
+        input_seq: seq,
         client_time_ms: current_time_ms(),
         payload: Some(input_event::Payload::Key(key_proto)),
     }
@@ -1018,12 +1018,13 @@ async fn run_client_loop(
     let mut is_controller = false;
     let mut input_sender = InputSender::new(256);
     let mut prediction_engine = PredictionEngine::new();
+    let mut rtt_estimator = RttEstimator::new();
     let mut last_applied_state_id: u64 = 0;
     let mut consecutive_mismatches: u32 = 0;
     let mut snapshot_in_flight: bool = false;
     let datagrams_negotiated = connection.max_datagram_size().is_some();
 
-    let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(64);
+    let (input_tx, mut input_rx) = mpsc::channel::<CtKeyEvent>(64);
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
 
@@ -1038,9 +1039,7 @@ async fn run_client_loop(
                         break;
                     }
 
-                    if let Some(input_event) = crossterm_key_to_proto(&key) {
-                        let _ = input_tx.blocking_send(input_event);
-                    }
+                    let _ = input_tx.blocking_send(key);
                 }
             }
         }
@@ -1072,6 +1071,7 @@ async fn run_client_loop(
         });
     }
 
+    let mut stall_logged = false;
     loop {
         if shutdown.load(Ordering::Relaxed) {
             return Ok(ClientResult::Shutdown);
@@ -1226,13 +1226,15 @@ async fn run_client_loop(
                                 AckResult::Ok { rtt_sample } => {
                                     state.metrics.inputs_acked += 1;
                                     if let Some(sample) = rtt_sample {
+                                        rtt_estimator.record_sample(sample.rtt_ms);
                                         state.metrics.rtt_samples.push(sample.rtt_ms);
                                         execute!(
                                             stdout(),
                                             MoveTo(0, 23),
                                             Print(format!(
-                                                "RTT: {}ms, Acked: {}, Inflight: {}        ",
-                                                sample.rtt_ms, ack.acked_seq, input_sender.inflight_count()
+                                                "RTT: {}ms, Acked: {}, Inflight: {}, RTO: {}ms, Link: {:?}        ",
+                                                sample.rtt_ms, ack.acked_seq, input_sender.inflight_count(),
+                                                rtt_estimator.rto_ms(), rtt_estimator.link_state()
                                             ))
                                         )?;
                                     }
@@ -1244,9 +1246,11 @@ async fn run_client_loop(
                     }
                 }
             }
-            Some(input_event) = input_rx.recv() => {
+            Some(key) = input_rx.recv() => {
                 if is_controller && input_sender.can_send() {
-                    send_input(send, &mut input_sender, &mut prediction_engine, &confirmed_screen, &input_event, state).await?;
+                    if let Some(input_event) = crossterm_key_to_proto(&key, input_sender.next_seq()) {
+                        send_input(send, &mut input_sender, &mut prediction_engine, &confirmed_screen, &input_event, state).await?;
+                    }
                 }
             }
             Some(script_cmd) = script_rx.recv() => {
@@ -1255,16 +1259,16 @@ async fn run_client_loop(
                     },
                     ScriptCommand::Type(text) => {
                         for c in text.chars() {
-                            let input_event = char_to_input_event(c);
                             if is_controller && input_sender.can_send() {
+                                let input_event = char_to_input_event(c, input_sender.next_seq());
                                 send_input(send, &mut input_sender, &mut prediction_engine, &confirmed_screen, &input_event, state).await?;
                             }
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
                     },
                     ScriptCommand::Key(key_str) => {
-                        if let Some(input_event) = parse_key_string(&key_str) {
-                            if is_controller && input_sender.can_send() {
+                        if is_controller && input_sender.can_send() {
+                            if let Some(input_event) = parse_key_string(&key_str, input_sender.next_seq()) {
                                 send_input(send, &mut input_sender, &mut prediction_engine, &confirmed_screen, &input_event, state).await?;
                             }
                         }
@@ -1362,6 +1366,28 @@ async fn run_client_loop(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                if let Some(age_ms) = input_sender.oldest_inflight_age_ms() {
+                    let rto = rtt_estimator.rto_ms();
+                    let stall_threshold = (rto * 4).max(2000);
+                    if age_ms > stall_threshold {
+                        if !stall_logged {
+                            log::warn!(
+                                "Connection stall detected: oldest input waiting {}ms (threshold: {}ms, RTO: {}ms)",
+                                age_ms, stall_threshold, rto
+                            );
+                            stall_logged = true;
+                        }
+                        state.metrics.stall_detected = true;
+                    } else {
+                        stall_logged = false;
+                    }
+                } else {
+                    stall_logged = false;
+                }
+
+                state.metrics.link_state = format!("{:?}", rtt_estimator.link_state());
+                state.metrics.rto_ms = rtt_estimator.rto_ms();
+                state.metrics.srtt_ms = rtt_estimator.srtt_ms().unwrap_or(0);
             }
         }
     }

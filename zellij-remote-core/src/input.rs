@@ -170,4 +170,13 @@ impl InputSender {
     pub fn inflight_count(&self) -> usize {
         self.inflight.len()
     }
+
+    /// Returns how long (in ms) the oldest unacked input has been waiting.
+    /// Returns None if no inputs are inflight.
+    /// Used for stall detection: if oldest > 4×RTO, connection may be stuck.
+    pub fn oldest_inflight_age_ms(&self) -> Option<u32> {
+        self.inflight
+            .front()
+            .map(|input| input.sent_at.elapsed().as_millis() as u32)
+    }
 }
