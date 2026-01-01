@@ -1,6 +1,6 @@
 # ZRP Implementation Status
 
-**Last Updated:** 2025-01-01 (Delta Optimization & Client Routing Fix)
+**Last Updated:** 2025-01-01 (Stall Detection & Connection Health)
 
 ## Overview
 
@@ -475,6 +475,38 @@ estimator.variance_ratio(); // rttvar / srtt
 - Window boundary behavior
 - Fast convergence on improvement
 - Zero/low RTT handling
+
+## Stall Detection & Connection Health (2025-01-01)
+
+Integrated adaptive RTO for connection health monitoring in the spike_client.
+
+### How It Works
+
+The client tracks how long the oldest unacked input has been waiting. If this exceeds a threshold based on the adaptive RTO, the connection is considered stalled.
+
+**Stall Threshold:** `max(4 × RTO, 2000ms)`
+
+- On stable links (RTO ~80ms): threshold = 2000ms (the minimum)
+- On degraded links (RTO ~400ms): threshold = 1600ms → clamped to 2000ms
+- On very bad links (RTO ~1000ms): threshold = 4000ms
+
+### Client Metrics
+
+New metrics available in spike_client JSON output:
+
+| Metric | Description |
+|--------|-------------|
+| `link_state` | Current link quality: "Stable", "Normal", or "Degraded" |
+| `rto_ms` | Current computed RTO in milliseconds |
+| `srtt_ms` | Smoothed RTT estimate |
+| `stall_detected` | Whether a stall was detected during the session |
+
+### Design Decisions
+
+- **No app-level retransmit**: QUIC streams already handle retransmission reliably
+- **RTO for health only**: Used to detect stuck connections, not for resending
+- **Edge-triggered logging**: Stall warning logged once per stall event, not continuously
+- **Sequence number consolidation**: All input sources use `InputSender.next_seq()` for consistency
 
 ## Next Steps
 

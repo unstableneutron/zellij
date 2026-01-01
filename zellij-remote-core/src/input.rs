@@ -179,4 +179,14 @@ impl InputSender {
             .front()
             .map(|input| input.sent_at.elapsed().as_millis() as u32)
     }
+
+    /// Adjust the maximum inflight window size (minimum 1 to prevent deadlock)
+    pub fn set_max_inflight(&mut self, max: usize) {
+        self.max_inflight = max.max(1);
+    }
+
+    /// Get current max_inflight setting
+    pub fn max_inflight(&self) -> usize {
+        self.max_inflight
+    }
 }

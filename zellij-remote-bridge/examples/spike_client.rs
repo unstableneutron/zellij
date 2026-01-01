@@ -1016,7 +1016,7 @@ async fn run_client_loop(
     let mut snapshot_received = false;
     let mut _delta_count = 0u32;
     let mut is_controller = false;
-    let mut input_sender = InputSender::new(256);
+    let mut input_sender = InputSender::new(10);
     let mut prediction_engine = PredictionEngine::new();
     let mut rtt_estimator = RttEstimator::new();
     let mut last_applied_state_id: u64 = 0;
@@ -1378,11 +1378,30 @@ async fn run_client_loop(
                             stall_logged = true;
                         }
                         state.metrics.stall_detected = true;
+                        // Trigger reconnect if mode allows
+                        if state.reconnect_mode != ReconnectMode::None {
+                            log::info!("Triggering reconnect due to connection stall");
+                            shutdown.store(true, Ordering::Relaxed);
+                            state.script_index = script_index_update.load(Ordering::Relaxed) as usize;
+                            return Ok(ClientResult::Disconnected);
+                        }
                     } else {
                         stall_logged = false;
                     }
                 } else {
                     stall_logged = false;
+                }
+
+                // Adaptive max_inflight based on link quality
+                let new_max = match rtt_estimator.link_state() {
+                    LinkState::Stable => 16,    // Allow more pipelining on good links
+                    LinkState::Normal => 10,    // Default
+                    LinkState::Degraded => 4,   // Backpressure on bad links
+                };
+                if input_sender.max_inflight() != new_max {
+                    log::debug!("Adjusting max_inflight: {} -> {} (link: {:?})",
+                        input_sender.max_inflight(), new_max, rtt_estimator.link_state());
+                    input_sender.set_max_inflight(new_max);
                 }
 
                 state.metrics.link_state = format!("{:?}", rtt_estimator.link_state());
